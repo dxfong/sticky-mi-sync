@@ -887,6 +887,19 @@ class NotesFabricGraph:
                 "这段 Authorization 不像是 NotesFabric 的令牌（应以 MSAuth1.0 usertoken= 开头）。"
                 "⚠ 别拿 Graph 的令牌（eyJ0eXAi... 那种 JWT）来粘 —— "
                 "那是另一套通道，读不到 2026 年的便笺。")
+        if ", type=" not in az and 'type=' not in az:
+            raise RuntimeError(
+                "Authorization 不完整 —— 少了结尾的 `, type=\"MSACT\"`。\n"
+                "DevTools 里这一行很长，很容易只选中前半段。请从行名开始整行复制：\n"
+                '  Authorization: MSAuth1.0 usertoken="Ew...", type="MSACT"')
+        if not auth.get("anchormailbox"):
+            # 只粘 authorization 一行时最常踩这个 —— 缺了账号标识，
+            # usable() 会判定不可用，但用户看不到任何解释。
+            raise RuntimeError(
+                "只解析出了 Authorization，缺 x-anchormailbox。\n"
+                "**请把两行都粘进来**（在 DevTools 里从行名开始整行复制）：\n"
+                '  Authorization: MSAuth1.0 usertoken="Ew...", type="MSACT"\n'
+                "  x-anchormailbox: MSA:你的账号@outlook.com")
 
         # ---- 保存后立刻验证；**不过就回滚**。
         #   旧顺序是"已保存 + 报验证失败"，既自相矛盾，又把一份用不了的凭据
