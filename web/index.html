@@ -1,0 +1,1881 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>便笺 ⇄ 小米笔记 同步器</title>
+<style>
+  :root{
+    --bg:#111312; --panel:#1a1d1b; --panel2:#222624; --line:#2e3331;
+    --text:#e6e9e7; --dim:#9aa39e; --accent:#5dcaa5; --accent2:#85b7eb;
+    --warn:#ef9f27; --err:#f09595;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1180px;margin:0 auto;padding:20px}
+  h1{font-size:17px;font-weight:500;margin:0 0 4px}
+  .sub{color:var(--dim);font-size:12px;margin-bottom:18px}
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .card h2{font-size:13px;font-weight:500;margin:0 0 10px;color:var(--dim);
+    text-transform:none;letter-spacing:.3px}
+  .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--err);flex:none}
+  .dot.on{background:var(--accent)}
+  .dot.warn{background:var(--warn)}
+  .kv{font-size:12px;color:var(--dim)}
+  button{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+    border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer}
+  button:hover{border-color:#4a504d}
+  button.primary{background:var(--accent);color:#06231a;border-color:var(--accent);font-weight:500}
+  button:disabled{opacity:.45;cursor:default}
+  input,select,textarea{background:var(--panel2);color:var(--text);
+    border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:13px;
+    font-family:inherit}
+  input[type=number]{width:70px}
+  textarea{width:100%;min-height:74px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  .code{font-family:ui-monospace,Consolas,monospace;font-size:12px;
+    background:var(--panel2);border:1px dashed var(--line);border-radius:8px;padding:10px;
+    word-break:break-all}
+  ul.list{list-style:none;margin:0;padding:0;max-height:270px;overflow:auto}
+  ul.list li{padding:7px 9px;border:1px solid var(--line);border-radius:8px;
+    margin-bottom:6px;font-size:13px;display:flex;gap:8px;align-items:baseline}
+  ul.list li .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tag{font-size:11px;padding:1px 6px;border-radius:6px;flex:none;
+    background:var(--panel);border:1px solid var(--line);color:var(--dim)}
+  .tag.ok{color:var(--accent);border-color:#1d4a3c}
+  .tag.bad{color:var(--err);border-color:#5a2a2a}
+  /* 合并列表右侧的两盏小灯：左微软 / 右小米。
+      双绿    = 两侧都有，且内容一致
+      一绿一红 = 一侧有一侧没有（**有这条的一侧为绿**，缺的一侧为红）
+      一绿一黄 = 两侧都有但内容不一致（**最后更改的那一侧为绿**，另一侧为黄） */
+  ul.list li .lamps{display:flex;gap:5px;flex:none;align-items:center}
+  .lamp{width:9px;height:9px;border-radius:50%;display:inline-block;
+    border:1px solid var(--line);background:transparent}
+  .lamp.on{background:var(--accent);border-color:var(--accent)}
+  .lamp.warn{background:var(--warn);border-color:var(--warn)}
+  .lamp.off{background:var(--err);border-color:var(--err)}
+  /* 每行左侧的选中框 —— 批量删除 / 同步选中都靠它。
+     行是 baseline 对齐的，复选框要自己居中才不会歪。 */
+  ul.list li .pick{flex:none;align-self:center;width:14px;height:14px;
+    margin:0;padding:0;accent-color:var(--accent);cursor:pointer}
+  ul.list li.picked{border-color:var(--accent)}
+  /* 登录闸门：盖住整个页面，没登录时应用界面完全不出现 */
+  .gate{position:fixed;inset:0;z-index:400;display:none;
+    align-items:center;justify-content:center;background:var(--bg);padding:16px}
+  .gateCard{width:min(430px,94vw);background:var(--panel2);
+    border:1px solid var(--line);border-radius:14px;padding:22px 22px 18px;
+    box-shadow:0 12px 44px rgba(0,0,0,.4)}
+  .gateCard h1{font-size:17px;margin:0 0 2px}
+  .gateCard input[type=password]{width:100%;box-sizing:border-box;margin-top:8px}
+  .gateCard code{background:var(--panel);padding:1px 5px;border-radius:4px;
+    font-size:12px;word-break:break-all}
+
+  /* 选中项的工具条（全选 / 已选几条 / 两个批量按钮） */
+  .pickbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+    font-size:12px;color:var(--dim);margin:6px 0 2px}
+  .pickbar b{color:var(--text)}
+  /* 自定义下拉（文件夹选择用）。
+     为什么不用原生 <select>：原生下拉一旦弹出就没法再更新内容，
+     做不到"点开时先刷新一次列表"。自己画一个才能"点开 → 先拉最新 → 再展示"。 */
+  .dd{position:relative;display:inline-block}
+  .ddBtn{min-width:150px;text-align:left}
+  .ddBtn::after{content:"▾";float:right;margin-left:8px;color:var(--dim)}
+  .ddList{position:absolute;top:100%;left:0;min-width:100%;z-index:60;
+    margin-top:4px;max-height:240px;overflow:auto;display:none;
+    background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+    box-shadow:0 6px 20px rgba(0,0,0,.28);padding:4px}
+  .ddList.open{display:block}
+  .ddItem{padding:6px 10px;border-radius:6px;cursor:pointer;font-size:13px;
+    white-space:nowrap}
+  .ddItem:hover{background:var(--panel)}
+  .ddItem.sel{color:var(--accent)}
+  .ddItem.off{color:var(--dim);cursor:default}
+  /* 一盏灯 + 它的删除按钮成对出现 —— 这样"×"属于哪一侧一目了然，
+     不会出现"两个 × 并排、分不清删的是谁"的情况 */
+  ul.list li .side{display:flex;align-items:center;gap:2px}
+  button.mini{padding:0 5px;font-size:13px;line-height:18px;border-radius:5px;
+    color:var(--dim);background:transparent;border-color:transparent}
+  button.mini:hover{color:var(--err);border-color:#5a2a2a}
+  ul.list li{cursor:pointer}
+  ul.list li:hover{border-color:#4a504d}
+  /* 右侧滑入的详情面板：默认整体移出屏幕外，加 .open 才滑进来 */
+  .detail{position:fixed;top:0;right:0;width:min(560px,92vw);height:100vh;
+    background:var(--panel);border-left:1px solid var(--line);z-index:50;
+    display:flex;flex-direction:column;
+    transform:translateX(101%);transition:transform .22s ease;
+    box-shadow:-8px 0 24px rgba(0,0,0,.35)}
+  .detail.open{transform:translateX(0)}
+  .detailHead{display:flex;align-items:center;gap:8px;padding:12px 14px;
+    border-bottom:1px solid var(--line);flex:none}
+  .detailHead b{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-size:14px}
+  .detailBody{flex:1;overflow:auto;padding:12px 14px}
+  .detailBody h4{margin:0 0 6px;font-size:12px;color:var(--dim);font-weight:600}
+  /* 正文原样铺开：pre-wrap 保留换行，不让长词撑破容器 */
+  .detailText{white-space:pre-wrap;word-break:break-word;font-size:13px;
+    line-height:1.65;background:var(--panel2);border:1px solid var(--line);
+    border-radius:8px;padding:10px 12px;max-height:44vh;overflow:auto}
+  .detailMeta{font-size:12px;color:var(--dim);margin:6px 0 16px}
+  /* 提示条 + 自定义确认框。
+     **刻意不用原生 alert/confirm**：浏览器在用户连续确认几次后会弹出
+     「阻止此页面创建更多对话框」，此后这些调用会静默返回 false，
+     代码里 `if (!confirm(...)) return` 就直接退出 —— 表现是"点了没反应"。
+     这个坑真实踩到过（删除按钮"失效"）。 */
+  .toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,20px);
+    background:var(--panel2);border:1px solid var(--line);border-radius:9px;
+    padding:9px 16px;font-size:13px;opacity:0;pointer-events:none;
+    transition:opacity .2s ease, transform .2s ease;z-index:80;max-width:80vw}
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+  .toast.ok{border-color:#1d4a3c;color:var(--accent)}
+  .toast.err{border-color:#5a2a2a;color:var(--err)}
+  /* 注意 ID 要和 JS 里创建的元素严格一致（`__ask`）。
+     这里一度写成 #askBox，导致 display:none 从未生效 ——
+     确认框关掉后 askMask 仍以 position:fixed 覆盖全屏，
+     把之后所有点击都吞了，表现就是"删除按钮失效"。 */
+  #__ask{display:none}
+  #__ask.show{display:block}
+  .askMask{position:fixed;inset:0;background:rgba(0,0,0,.52);z-index:90}
+  .askCard{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:18px 20px;z-index:91;width:min(460px,90vw)}
+  .askText{font-size:13px;line-height:1.75;white-space:pre-wrap}
+  ul.log{list-style:none;margin:0;padding:0;max-height:220px;overflow:auto;
+    font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  ul.log li{padding:2px 0;color:var(--dim);white-space:pre-wrap;word-break:break-all}
+  ul.log li.warn{color:var(--warn)} ul.log li.error{color:var(--err)}
+  .muted{color:var(--dim);font-size:12px}
+  .sep{height:1px;background:var(--line);margin:12px 0}
+  .flexsp{display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .banner{background:#3a2a08;border:1px solid #7a5510;color:#fac775;border-radius:10px;
+    padding:11px 14px;margin-bottom:14px;font-size:13px;line-height:1.65}
+  .banner b{color:#ffd88a}
+  .banner.err{background:#3a1113;border-color:#7a2020;color:#f7c1c1}
+  .banner.err b{color:#ffd0d0}
+  .banner code{background:#2a1d05;padding:1px 5px;border-radius:4px;font-size:12px}
+  .banner.err code{background:#26090b}
+  /* 账号与登录：默认折叠，把屏幕让给记录列表。
+     展开高度由 JS 按 scrollHeight 实测写入（见 applyAcct），
+     不写死像素值 —— 以后往面板里加内容也不会被裁掉。 */
+  #acctPanel{overflow:hidden;max-height:0;opacity:0;pointer-events:none;
+    transition:max-height .25s ease,opacity .18s ease,margin-bottom .25s ease;
+    margin-bottom:0}
+  #acctPanel.open{opacity:1;pointer-events:auto;margin-bottom:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="banner" id="errBanner" style="display:none"></div>
+  <div class="banner" id="mockBanner" style="display:none"></div>
+  <div class="flexsp">
+    <div>
+      <h1>便笺 ⇄ 小米笔记 同步器</h1>
+      <div class="sub" id="subline">加载中…</div>
+    </div>
+    <div class="row">
+      <!-- 左侧：状态文字（跟标题一起，不跟右边抢位置） -->
+      <span class="kv" id="autoHint"></span>
+      <span class="kv">下次同步 <b id="countdown">–</b></span>
+      <span class="kv" id="syncProg"></span>
+      <span style="flex:1"></span>
+      <!-- 右侧，从右往左依次：
+             ① 自动同步开关（**与中止功能已合并成一个按钮** ——
+                一个按钮，点下去做什么由当前状态决定：关→开 / 开→关 /
+                正在跑→中止本轮。见 renderSwitch 与 btnAuto.onclick）
+             ② 只读拉取两端列表
+             ③ 账号与登录（点一下从上方滑出面板：两端登录状态 + 退出登录）
+             ④ 就绪提示（"✓ 两端已登录且已选定文件夹…"） -->
+      <span class="kv" id="readyBox"></span>
+      <button id="btnAcct" title="账号与登录状态">账号与登录 ▾</button>
+      <button id="btnFetch">只读拉取两端列表</button>
+      <button id="btnAuto" style="font-size:14px;padding:6px 14px">自动同步：关</button>
+    </div>
+  </div>
+
+  <!-- 账号与登录：默认折叠，由顶部「账号与登录」按钮控制开合。
+       为什么折叠 —— 登录状态是"看一眼就不用再管"的信息，常驻会占掉整整一行高度，
+       而记录列表才是日常主体。
+       为什么不无条件折叠 —— 任一端掉线时**自动展开**，否则用户只会以为同步坏了。 -->
+  <div id="acctPanel">
+    <div class="grid g2" style="margin-bottom:14px">
+      <div class="card">
+        <h2>微软便笺</h2>
+        <div class="row"><span class="dot" id="gDot"></span>
+          <b id="gMode">–</b><span class="kv" id="gAcct"></span></div>
+        <div class="sep"></div>
+        <div id="gLoginBox"></div>
+      </div>
+      <div class="card">
+        <h2>小米笔记</h2>
+        <div class="row"><span class="dot" id="xDot"></span>
+          <b id="xMode">–</b><span class="kv" id="xAcct"></span></div>
+        <div class="kv" id="xFolder" style="margin-top:6px"></div>
+        <div id="xFolderBox" style="margin-top:10px"></div>
+        <div class="sep"></div>
+        <div id="xLoginBox"></div>
+      </div>
+    </div>
+    <!-- 「退出登录」从「设置」搬到这里：它退的是**访问密码这一层**的浏览器会话，
+         不是小米 / 微软账号。两者分层 —— 登录页管"谁能打开这个页面"，
+         上面两张卡片管"连谁的便笺"。放在账号面板里语义才对，也不会跟
+         间隔 / 冲突策略那些日常配置混在一行。 -->
+    <div class="card" style="margin-bottom:14px">
+      <div class="row">
+        <span class="kv">退出的是「访问密码」这一层的浏览器会话，<b>不影响</b>已保存的小米 / 微软登录态。</span>
+        <span style="flex:1"></span>
+        <button id="btnLogout" title="退出本次浏览器会话（不影响已保存的小米/微软登录态）">退出登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 原「同步开关」卡片已合并到顶部工具栏；「清空后台数据」按钮已按要求移除
+       （后端 /api/reset 仍在，需要时可直接调）。 -->
+
+  <div class="card" style="margin-bottom:14px">
+    <h2>设置 <button id="cfgToggle" style="margin-left:8px">展开</button></h2>
+    <!-- 默认收起 —— 这些是一次性配置，日常不需要一直占着屏幕 -->
+    <div id="cfgBox" style="display:none">
+      <div class="row">
+        <label class="kv">间隔(秒) <input type="number" id="interval" min="1" max="3600"></label>
+        <label class="kv">冲突策略
+          <select id="conflict">
+            <option value="keep_both">保留双方（推荐）</option>
+          </select></label>
+        <label class="kv">首次配对
+          <select id="pairing">
+            <option value="graph_authoritative">以便笺为准</option>
+            <option value="adopt_both">两边都收</option>
+          </select></label>
+        <label class="kv"><input type="checkbox" id="dryToggle"> 全局预演模式（不写任何数据）</label>
+        <button id="btnSaveCfg">保存设置</button>
+        <!-- 「退出登录」已搬到顶部「账号与登录」面板里 —— 它属于身份操作，
+             和间隔 / 冲突策略这些日常配置不是一类东西。 -->
+      </div>
+      <!-- 「连接模式」下拉已移除：两个模式现在是固定的
+           （微软 = fabric 云端全量可读写；小米 = real），留个下拉只会让人误切。
+           切换模式的能力在后端仍然保留（/api/mode），需要时再放出来。 -->
+      <div class="kv" id="cfgWarn" style="margin-top:8px"></div>
+    </div>
+  </div>
+
+  <!-- 合并后的单列表：一条内容一行，右侧两盏灯分别代表微软侧 / 小米侧是否在线。
+       已映射的两条会被合并成同一行 —— 否则同一条内容会出现两次，看着像两条记录。 -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>记录 <span class="kv" id="rowCount"></span></h2>
+    <!-- 选中工具条：左侧复选框选中若干条，再用下面按钮批量操作。
+         备份靠本模块**最右侧**（它是对整份数据的操作，和列表内容无关，
+         放最右边不会跟"选中/删除"这些逐条操作混在一起）。 -->
+    <div class="pickbar">
+      <button id="btnPickAll" title="全选 / 取消全选当前列表">全选</button>
+      <span>已选 <b id="pickCount">0</b> 条</span>
+      <button id="btnDelPicked" title="把选中的记录移入回收站（两端同时删，可在回收站恢复）">删除选中</button>
+      <button id="btnSyncPicked" title="把选中的记录同步成两侧一致：一侧缺就补建到另一侧；两侧内容不同则以**最后修改的那一侧**为准覆盖另一侧">同步选中</button>
+      <span class="kv" id="pickHint"></span>
+      <span style="flex:1"></span>
+      <button id="btnBackup" title="全量备份：两端全部记录（含正文与时间字段）+ 配对状态 + 配置。**不含任何凭据**。会全量重拉两端，约 20 秒">备份</button>
+    </div>
+    <ul class="list" id="mergedList"></ul>
+  </div>
+
+  <!-- 回收站：删除的条目都进这里，可以按"删除当时两端的实际状态"恢复 -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>回收站 <span class="kv" id="trashCount"></span>
+      <button id="trashToggle" style="margin-left:8px">展开</button></h2>
+    <div id="trashBox" style="display:none">
+      <div class="kv" style="margin:6px 0 8px">
+        <b>在程序里删、或直接在那边的 App / 网页里删，都会进这里。</b><br>
+        云端删除时，同步会把另一侧也删掉 —— 删之前两端内容都会先存进来，
+        所以恢复能把两侧都建回来（被云端删掉的那一侧用的是"它最后的样子"）。
+        <br>恢复按<b>删除当时两端的实际状态</b>还原：当时只在便笺的，恢复后也只在便笺；已配对过的会一并恢复配对关系。
+      </div>
+      <ul class="list" id="trashList"></ul>
+    </div>
+  </div>
+
+  <!-- 点记录后从右侧滑入的详情面板。**只读** —— 里面没有任何可编辑元素，
+       想改内容得去便笺/小米那边改，改完由同步器搬过去。 -->
+  <div id="detail" class="detail" aria-hidden="true">
+    <div class="detailHead">
+      <b id="detailTitle">记录详情</b>
+      <button id="detailCopy" title="复制正文">复制</button>
+      <button id="detailClose">关闭</button>
+    </div>
+    <div class="detailBody" id="detailBody"></div>
+  </div>
+
+  <div class="card" id="mockCard" style="margin-bottom:14px;display:none">
+    <h2>Mock 面板（演示用：在某一侧造改动，观察同步行为）</h2>
+    <div class="row">
+      <input id="mockText" placeholder="要写入的文本" style="flex:1;min-width:200px">
+      微软侧 <button data-mock="graph:add">加一条</button>
+      小米侧 <button data-mock="xiaomi:add">加一条</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>日志</h2>
+    <ul class="log" id="logList"></ul>
+  </div>
+</div>
+
+<!-- 登录闸门：没登录时盖住整个页面。
+     服务端对所有 /api/* 都要求已登录（只有 auth 那几个放行），
+     所以这张卡片不是装饰 —— 不过它，前端拿不到任何数据。 -->
+<div id="loginGate" class="gate" aria-hidden="true">
+  <div class="gateCard">
+    <h1>便笺 ⇄ 小米笔记 同步器</h1>
+    <div class="sub" style="margin-bottom:4px">需要访问密码</div>
+    <div id="gateBody"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// 后端地址解析：
+// 页面可能是被"预览面板"以静态文件方式打开的，那时它的 /api/* 会打到静态服务器上，
+// 拿到空响应 → JSON 解析失败。所以同源失败时自动退回到真实后端。
+const DEFAULT_BACKEND = "http://127.0.0.1:8787";
+let API_BASE = "";
+let lastErr = "";
+
+async function rawApi(path, body, base) {
+  const opt = body !== undefined
+    ? {method: "POST", headers: {"Content-Type": "application/json"},
+       body: JSON.stringify(body)}
+    : {};
+  const r = await fetch(base + path, opt);
+  const txt = await r.text();
+  try {
+    const j = JSON.parse(txt);
+    // 把 HTTP 状态带出去：调用方要能区分"业务失败"和"没登录"（401）。
+    // 不带出来的话，"未登录"会退化成一堆看不懂的业务报错。
+    if (j && typeof j === "object") j._http = r.status;
+    return j;
+  }
+  catch (e) {
+    throw new Error(`响应不是 JSON（HTTP ${r.status}）：${txt.slice(0, 70) || "(空)"}`);
+  }
+}
+
+async function api(path, body) {
+  const bases = API_BASE ? [API_BASE, ""] : ["", DEFAULT_BACKEND];
+  let err = null;
+  for (const b of bases) {
+    try {
+      const out = await rawApi(path, body, b);
+      API_BASE = b;
+      lastErr = "";
+      // 401 = 没登录 / 会话失效 → 立刻弹登录页。
+      // 不这么做的后果：后台每 5 秒轮询一次、每次都报 401，
+      // 用户看到的是一屏红字，而不是"你该登录了"。
+      if (out && out._http === 401 && out.need_login) showGate("login");
+      return out;
+    } catch (e) { err = e; }
+  }
+  lastErr = String((err && err.message) || err);
+  throw err;
+}
+
+function showBackendError(e) {
+  const el = $("errBanner");
+  el.style.display = "block";
+  el.innerHTML = `<b>连不上后端。</b>${esc(e && e.message || e)}<br>
+    页面来源 <code>${esc(location.origin)}</code>　已尝试 <code>${esc(API_BASE || "同源")}</code> 和 <code>${esc(DEFAULT_BACKEND)}</code><br>
+    <b>按顺序检查：</b><br>
+    ① 后端在跑 —— 项目目录双击 <code>启动服务.bat</code>（或 <code>python server.py</code>）；<br>
+    ② <b>在浏览器地址栏直接输入 <code>http://127.0.0.1:8787/</code></b> ——
+       不要在预览面板里点、别双击 HTML 文件（那是 <code>file://</code>）、
+       也不要写 <code>localhost</code>（本机 localhost 解析成 IPv6 <code>::1</code>，
+       服务只监听 IPv4，可能连不上）；<br>
+    ③ 若地址栏里是别的来源（如预览面板地址），那属于跨域，浏览器会在 CORS 层直接拦掉。`;
+  $("subline").textContent = "后端未连接";
+}
+let devicePolling = null;
+
+function dot(el, state){
+  el.className = "dot" + (state === true ? " on" : state === "warn" ? " warn" : "");
+}
+function td(sec){
+  if (!sec || sec < 0) return "–";
+  const m = Math.floor(sec/60), s = Math.floor(sec%60);
+  return m > 0 ? `${m}:${String(s).padStart(2,"0")}` : `${s}s`;
+}
+
+// ---------------------------------------------------------------- 渲染
+// 请求序号：页面每 2 秒自动刷新一次，如果用户恰好在这期间点了"退出登录"，
+// 那次已经在飞行中的刷新会带回**旧状态**，晚一步落地就把界面又画成"已登录"。
+// 用递增序号只应用最新一次的结果，从根上消掉这种"状态回跳"。
+let refreshSeq = 0;
+
+// ---- 「账号与登录」下拉面板 ----
+// 两端都登录 → 收起，把屏幕让给记录列表；
+// 任一端掉线 → **自动展开**（否则用户只会以为同步坏了，不知道要去处理登录）。
+//
+// ★ 只在状态**发生变化**时才自动决定开合。不这么做的话，用户手动点开面板后，
+//   5 秒一次的轮询会立刻把它收回去 —— 表现成「点了一下没反应」。
+let acctOpen = false;
+let acctSig = "";
+
+function applyAcct(){
+  const p = $("acctPanel");
+  if (!p) return;
+  p.classList.toggle("open", acctOpen);
+  // 高度按实测 scrollHeight 写入，不写死像素：以后往面板里加内容也不会被裁掉。
+  // max-height:0 + overflow:hidden 时 scrollHeight 仍是**内容完整高度**，测得准。
+  p.style.maxHeight = acctOpen ? p.scrollHeight + "px" : "0px";
+  const b = $("btnAcct");
+  if (b) b.textContent = "账号与登录 " + (acctOpen ? "▴" : "▾");
+}
+
+function renderAcct(g, x){
+  const gm = !!(g && g.connected), xm = !!(x && x.connected);
+  const healthy = gm && xm;
+  const sig = healthy ? "ok" : "bad";
+  if (sig !== acctSig) {        // 只在变化时自动切换，理由见上面那条 ★
+    acctSig = sig;
+    acctOpen = !healthy;
+  }
+  applyAcct();
+  const b = $("btnAcct");
+  if (!b) return;
+  if (healthy) {
+    b.title = "两端都已登录。点一下" + (acctOpen ? "收起" : "展开") + "详情";
+    b.style.color = "";
+  } else {
+    const miss = [];
+    if (!gm) miss.push("微软");
+    if (!xm) miss.push("小米");
+    // 收起状态下也要能一眼看出有问题，所以把「谁没登录」直接写在按钮上
+    b.textContent = "⚠ " + miss.join("+") + "未登录 ▾";
+    b.title = "有账号没登录，点开处理";
+    b.style.color = "var(--warn)";
+  }
+}
+
+$("btnAcct").onclick = () => { acctOpen = !acctOpen; applyAcct(); };
+
+async function refresh(){
+  if (!appStarted) return;   // 还没过登录闸门 —— 一次请求都不发
+  const seq = ++refreshSeq;
+  let st;
+  try { st = await api("/api/state"); }
+  catch(e){ if (seq === refreshSeq) showBackendError(e); return; }
+  if (seq !== refreshSeq) return;          // 已经有更新的刷新在跑了，丢弃这次
+  $("errBanner").style.display = "none";
+  // 存一份最新状态：自动同步按钮是"三态"的，点击时按当前状态决定做什么
+  // （关→开 / 开→关 / 正在跑→中止本轮）；「同步选中」也要看它是否该置灰。
+  lastState = st;
+
+  const g = st.graph || {}, x = st.xiaomi || {};
+  $("subline").textContent =
+    `已建立映射 ${st.counts.links} 条` +
+    (st.counts.conflicts ? ` · 冲突 ${st.counts.conflicts}` : "") +
+    (st.busy ? " · 同步中…" : "");
+  $("countdown").textContent = td((st.next_sync_at||0) - (st.now||0));
+
+  // 同步进度。
+  // **中止已与自动同步按钮合并**（一个按钮，动作由状态决定）——
+  // 所以这里不再单独操作中止按钮；见 renderSwitch 与 btnAuto.onclick。
+  const pr = st.progress || {};
+  const running = !!st.busy;
+  if (running && pr.total) {
+    $("syncProg").textContent = `进度 ${pr.done || 0}/${pr.total}`;
+  } else if (st.resume_pending) {
+    // 上次中止过、还没跑完 —— 提醒一下点同步是"接着跑"而不是重来
+    $("syncProg").textContent = `有断点待续（${st.resume_pending} 条已处理）`;
+  } else {
+    $("syncProg").textContent = "";
+  }
+
+  dot($("gDot"), g.connected); dot($("xDot"), x.connected);
+  renderAcct(g, x);       // 「账号与登录」面板：两端正常就收起，任一端掉线自动弹出
+  // 微软侧四种模式要分清楚 —— 它们能力差别很大，笼统写"真实连接"会误导：
+  //   fabric 云端全量可读写（正确方案）
+  //   real   走 Graph，缺 2026 年的便笺
+  //   local  只有本机能读，容器里没有
+  const GMODE_LABEL = {
+    mock:   "Mock 模式（假数据）",
+    real:   "Graph · 缺 2026 便笺",
+    local:  "本机便笺库 · 只读",
+    fabric: "NotesFabric 云端 · 可读写",
+  };
+  $("gMode").textContent = GMODE_LABEL[g.mode] || g.mode;
+  $("xMode").textContent = x.mode === "mock" ? "Mock 模式" : "真实连接";
+  $("gAcct").textContent = g.account ? "· " + g.account : (g.configured===false ? "· 未配置 client_id" : "");
+  $("xAcct").textContent = x.account ? "· " + x.account : "";
+  // 只在真正解析出 folder_id 时才显示"目标文件夹" —— 否则会出现
+  // "目标文件夹：微软便笺" 但 readiness 又说"未指定"的自相矛盾显示
+  $("xFolder").textContent = x.folder_id
+    ? `目标文件夹：${x.folder || x.folder_id}` +
+      (x.mode === "real" && !x.write_enabled ? " · 写入未启用" : "")
+    : "";
+
+  renderLoginBoxes(g, x, st.config);
+  renderBanner(g, x);
+  renderSwitch(st);
+  renderFolderBox(false, x.connected);
+
+  $("interval").value = st.config.sync_interval_sec;
+  $("dryToggle").checked = !!st.config.dry_run;
+  $("pairing").value = st.config.initial_pairing || "graph_authoritative";
+  // （连接模式下拉已移除：微软固定 fabric、小米固定 real）
+  $("cfgWarn").textContent = (x.mode === "real" && st.config.sync_interval_sec < 30)
+    ? "⚠ 真实小米接口建议间隔 ≥ 30 秒，5 秒高频轮询有风控风险" : "";
+
+  // Mock 面板**已停用**（2026-09-16）：这个服务现在只操作真实在线数据，
+  // 不再提供"造假数据观察同步"的入口。面板元素保留在 DOM 里（display:none），
+  // 万一要恢复 mock 测试，把下面这行换回原判断即可：
+  //   $("mockCard").style.display = (g.mode==="mock"||x.mode==="mock") ? "block" : "none";
+  $("mockCard").style.display = "none";
+
+  const logs = st.logs || [];
+  $("logList").innerHTML = logs.map(l => {
+    const t = new Date(l.ts*1000).toLocaleTimeString("zh-CN",{hour12:false});
+    const cls = l.level === "error" ? "error" : l.level === "warn" ? "warn" : "";
+    return `<li class="${cls}">${t}  ${esc(l.msg)}</li>`;
+  }).join("") || '<li>暂无日志</li>';
+
+  const nt = await api("/api/notes");
+  const rows = nt.rows || [];
+  const c = nt.counts || {};
+  $("rowCount").textContent =
+    `(${c.total || rows.length} 行 · 便笺 ${c.graph || 0} · 小米 ${c.xiaomi || 0}` +
+    `${c.merged ? ` · 已配对 ${c.merged}` : ""})`;
+
+  // 两盏灯（左微软 / 右小米），三态见上面的 CSS 注释。
+  // 判定"内容一致"用后端给的 hash —— **只比字数不够**：
+  // 同样字数、内容不同是常见情况（改几个字长度没变）。
+  const lamp = (name, cls, tip) =>
+    `<span class="lamp ${cls}" title="${name}${tip}"></span>`;
+  const lampPair = (g, m) => {
+    const NG = "微软便笺", NX = "小米笔记";
+    if (g && m) {
+      if (g.hash && m.hash && g.hash === m.hash) {
+        return [lamp(NG, "on", "：有 · 与小米一致"),
+                lamp(NX, "on", "：有 · 与便笺一致")];
+      }
+      // 两侧都有但内容不一致 —— 时间较新的那一侧是绿，另一侧是黄。
+      // （新的那侧＝"最后更改的一侧"，正是这一轮该往外推的内容。）
+      const gNewer = String(g.time || "") >= String(m.time || "");
+      return gNewer
+        ? [lamp(NG, "on", "：有 · 较新（内容与小米不一致）"),
+           lamp(NX, "warn", "：有 · 较旧（内容与便笺不一致）")]
+        : [lamp(NG, "warn", "：有 · 较旧（内容与小米不一致）"),
+           lamp(NX, "on", "：有 · 较新（内容与便笺不一致）")];
+    }
+    if (g) return [lamp(NG, "on", "：有这条"), lamp(NX, "off", "：没有这条")];
+    if (m) return [lamp(NG, "off", "：没有这条"), lamp(NX, "on", "：有这条")];
+    return [lamp(NG, "off", "：没有"), lamp(NX, "off", "：没有")];
+  };
+
+  // 列表重画之后，把已经不在列表里的勾选清掉（比如它刚被删了/同步后合并成别的行），
+  // 否则"已选 3 条"里可能混着已经不存在的 key，点批量操作会报"找不到这条记录"。
+  // **必须在这里做**：这是唯一知道"当前列表有哪些 key"的地方。
+  const nowKeys = new Set(rows.map(r => r.key));
+  for (const k of Array.from(picked)) if (!nowKeys.has(k)) picked.delete(k);
+  updatePickUI();
+
+  $("mergedList").innerHTML = rows.map(r => {
+    const g = r.graph, m = r.xiaomi;
+    // 两侧都有时优先显示便笺的标题（便笺是权威源）
+    const title = (g && g.title) || (m && m.title) || "(空)";
+    const chars = Math.max(g ? g.chars : 0, m ? m.chars : 0);
+    const tag = r.conflict
+      ? '<span class="tag bad">冲突</span>'
+      : (r.linked ? '<span class="tag ok">已配对</span>'
+                  : '<span class="tag bad">未配对</span>');
+    // 删除不再放在行里 —— 改成左侧复选框 + 上方的「删除选中」批量按钮
+    // （行内的 × 容易误点，而且一次只能删一条）。
+    const on = picked.has(r.key);
+    return `<li data-key="${esc(r.key)}" class="${on ? "picked" : ""}" title="点击查看内容">
+      <input type="checkbox" class="pick" data-pick="${esc(r.key)}"${on ? " checked" : ""}
+             title="勾选这条（用于「删除选中」/「同步选中」）">
+      <span class="t">${esc(title)}</span>
+      ${tag}
+      <span class="kv">${chars}字</span>
+      <span class="lamps">${lampPair(g, m).join("")}</span>
+    </li>`;
+  }).join("") || '<li class="muted">（空，先点「拉取列表」）</li>';
+
+  // 回收站**展开着**才去刷新它 —— 收起时不请求，省掉无谓的往返。
+  // 这里用 DOM 状态判断而不是变量，避免和后面声明顺序打架。
+  if ($("trashBox") && $("trashBox").style.display === "block") renderTrash();
+
+  // ★ 快照自我修正。
+  // 列表是"就地补丁"维护的（写成功一条并一条），它**不等价于**和远端状态完全一致
+  // —— 重建、改链这类分支会改变行的构成。而同步开关**关着**时后台根本不重拉列表，
+  // 于是偏差会一直显示下去，只能靠手动点「拉取列表」纠正（实测被这么反馈过）。
+  // 所以这里：空闲 + 没开自动同步 + 快照脏 → 自己补一次全量拉取，拉完重画。
+  // 开关开着时不需要：每轮开头本来就会全量重拉。
+  // 60 秒退避：万一持续失败（比如网络不通）也不会每 5 秒打一次。
+  if (st.snapshot_dirty && !st.busy && !st.auto_sync && !snapshotPulling
+      && (Date.now() - snapshotPullAt) > 60000) {
+    snapshotPulling = true;
+    snapshotPullAt = Date.now();
+    api("/api/fetch", {}).catch(() => {}).then(() => {
+      snapshotPulling = false;
+      refresh();          // 拉完立刻重画，用户马上看到真实状态
+    });
+  }
+}
+
+function esc(s){ return String(s??"").replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+// ---------------------------------------------------------------- 轻量 UI
+// 统一用自绘的提示条 / 确认框，**不用原生 alert & confirm**。
+// 原因：浏览器在用户连续确认几次后会弹「阻止此页面创建更多对话框」，
+// 之后 confirm() 静默返回 false、alert() 直接不显示 ——
+// 表现就是"按钮点了没反应"。删除按钮"失效"查了半天就是这个。
+function toast(msg, kind){
+  let el = $("__toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "__toast";
+    document.body.appendChild(el);
+  }
+  el.className = "toast show" + (kind ? " " + kind : "");
+  el.textContent = msg;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = "toast"; }, 3800);
+}
+
+function ask(msg){
+  return new Promise(resolve => {
+    let box = $("__ask");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "__ask";
+      box.innerHTML =
+        `<div class="askMask"></div>
+         <div class="askCard">
+           <div class="askText" id="__askText"></div>
+           <div class="row" style="justify-content:flex-end;margin-top:14px">
+             <button id="__askNo">取消</button>
+             <button class="primary" id="__askYes">确定</button>
+           </div>
+         </div>`;
+      document.body.appendChild(box);
+    }
+    $("__askText").textContent = msg;
+    box.classList.add("show");
+    const done = v => {
+      box.classList.remove("show");
+      $("__askYes").onclick = null;
+      $("__askNo").onclick = null;
+      resolve(v);
+    };
+    $("__askYes").onclick = () => done(true);
+    $("__askNo").onclick = () => done(false);
+    box.querySelector(".askMask").onclick = () => done(false);
+  });
+}
+
+// 把原生的 alert 也换掉 —— 它同样会被浏览器的"阻止对话框"拦掉。
+// alert 没有返回值，所以直接覆盖最省事，所有既有调用点不用动。
+window.alert = function (msg) { toast(String(msg), "err"); };
+// confirm 有同步返回值，没法用异步的 ask 覆盖，只能逐个改调用点
+// （见后面几处 `await ask(...)`）。
+
+// 演示模式横幅：必须一眼看到，否则会误以为"已经真的同步过去了"
+function renderBanner(g, x){
+  // 演示模式横幅**已停用**（2026-09-16）：mock 模式收敛掉之后，
+  // 界面上不会再出现"当前是假数据"的状态，所以横幅恒隐藏。
+  // 原逻辑保留在注释里，恢复 mock 时去掉 return 即可。
+  // const sides = [];
+  // if (g.mode === "mock") sides.push("微软便笺");
+  // if (x.mode === "mock") sides.push("小米笔记");
+  const el = $("mockBanner");
+  el.style.display = "none";
+  return;
+  /* eslint-disable */
+  /*
+  const sides = [];
+  if (g.mode === "mock") sides.push("微软便笺");
+  if (x.mode === "mock") sides.push("小米笔记");
+  if (!sides.length){ el.style.display = "none"; return; }
+  el.style.display = "block";
+  */
+}
+
+// 自动同步开关按钮：未就绪就禁用，并把缺什么写清楚
+function renderSwitch(st){
+  const rd = st.readiness || {ready:false, blockers:["状态未知"]};
+  const on = !!st.auto_sync;
+  const busy = !!st.busy;              // 后台正在跑一轮
+  const aborting = !!st.aborting;      // 已经请求中止、还没停
+  const b = $("btnAuto");
+
+  // ★ 一个按钮承担两件事（自动同步开关 + 中止），**动作由当前状态决定**：
+  //     关            → 点一下：开启自动同步
+  //     开 + 空闲      → 点一下：关闭自动同步
+  //     开 + 正在跑    → 点一下：**中止当前这一轮**（自动同步保持开着）
+  //     正在中止       → 置灰，等它停
+  // 为什么合并成一个：中止只在"正在跑"时有意义，做成独立按钮平时一直是灰的、
+  // 占地方又容易误点；而这两种操作的时机天然互斥，放同一个按钮上不会有歧义。
+  if (aborting) {
+    b.textContent = "正在中止…";
+    b.disabled = true;
+    b.classList.remove("primary");
+    b.title = "已请求中止 —— 会把当前这条处理完再停，已完成的动作不回滚";
+  } else if (!on) {
+    b.textContent = "自动同步：关";
+    b.disabled = !rd.ready;            // 打开前必须两端登录 + 选定文件夹
+    b.classList.remove("primary");
+    b.title = rd.ready
+      ? "当前：关。点一下开启自动同步（后台每隔几秒自动拉取并同步一轮，列表自动刷新）"
+      : ("还开不了，先解决：" + rd.blockers.join("；"));
+  } else if (busy) {
+    b.textContent = "中止本轮";
+    b.disabled = false;
+    b.classList.add("primary");
+    b.title = ("正在同步中 —— 点一下中止当前这一轮（自动同步保持开着）。"
+               + "不是立即掐断：会把当前这条处理完再停，已完成的动作不回滚。"
+               + "想彻底关掉自动同步：先在这里中止，等它不忙时再点一下这个按钮。");
+  } else {
+    b.textContent = "自动同步：开";
+    b.disabled = false;
+    b.classList.add("primary");
+    b.title = "当前：开。点一下关闭自动同步";
+  }
+
+  $("autoHint").textContent = on ? "运行中" : (rd.ready ? "可以打开" : "尚不可用");
+  $("countdown").textContent = on ? td((st.next_sync_at || 0) - (st.now || 0)) : "已关闭";
+  $("readyBox").innerHTML = rd.ready
+    ? '<span style="color:var(--accent)">✓ 两端已登录且已选定文件夹，可以开启自动同步</span>'
+    : '开启自动同步前还需要：<b style="color:var(--warn)">'
+      + rd.blockers.map(esc).join("；") + "</b>";
+}
+
+// 小米文件夹选择器：只渲染一次，避免每 2 秒刷新把下拉框关掉
+let folderRendered = false;
+// 最近一次 /api/state 的完整结果。给"需要按当前状态决定可用性"的控件用 ——
+// 主要是「同步选中」：自动同步开着时它必须置灰（否则手动点会和后台那一轮撞车）。
+let lastState = {};
+// 「界面快照需要补一次全量拉取」的去重 + 退避。
+// 为什么需要：同步开关关着时后台不会重拉列表，而"就地补丁"不等价于
+// 和远端真实状态完全一致 —— 不补的话偏差会一直显示下去（实测反馈过）。
+let snapshotPulling = false;
+let snapshotPullAt = 0;
+// 记录列表里被勾选的条目（存的是行 key，如 link:<mi_id> / g:<gid> / m:<mid>）。
+// **跨刷新保留**：列表每 5 秒会被后台轮询重画一次，
+// 不放进这个集合的话勾选会被清掉，批量操作根本没法用。
+// 只在"这一轮确实拿到了完整列表"时才剔除已经不存在的 key（见 renderNotes）。
+const picked = new Set();
+let folderState = "";
+let xiaomiConnected = null;      // 由 refresh() 更新，供 renderFolderBox 判断
+let folderData = null;           // 最近一次 /api/xiaomi/folders 的结果（下拉打开时先展示它）
+let folderPending = "";          // 下拉里"选中但还没保存"的 folder_id
+
+// 把 folder_id 换成可读名字
+function folderNameOf(fid) {
+  const has = (folderData && folderData.folders) || [];
+  const hit = has.find(f => String(f.id) === String(fid || ""));
+  return hit ? hit.subject : "";
+}
+
+// 只画一次骨架；下拉的内容每次"点开"时再刷新（这是用户要的行为：
+// 不要再手动点「刷新列表」，点开下拉就等于刷新一次）。
+function renderFolderInner() {
+  const box = $("xFolderBox");
+  const d = folderData || {};
+  const cur = d.current || {};
+  const hasSel = !!cur.folder_id;
+  const s = d.stats || {};
+  const shown = folderNameOf(folderPending) || "（请选择文件夹）";
+  box.innerHTML = `
+    <div class="row" style="align-items:flex-start">
+      <div class="dd">
+        <button id="xFolderBtn" class="ddBtn"
+                title="点开时会**自动刷新**文件夹列表">${esc(shown)}</button>
+        <div class="ddList" id="xFolderList"></div>
+      </div>
+      <button id="xFolderSave">设为同步目标</button>
+    </div>
+    <div class="kv" id="xFolderStat" style="margin-top:6px">
+      该文件夹内 <b>${s.scoped ?? "?"}</b> 条 ／ 小米笔记总计 <b>${s.total ?? "?"}</b> 条
+      ${hasSel ? "" : `　<span style="color:var(--warn)">尚未指定同步目标 —— 选好后点「设为同步目标」</span>`}
+      ${d.ok === false ? `　<span style="color:var(--err)">${esc(d.error || "")}</span>` : ""}
+    </div>`;
+  $("xFolderBtn").onclick = (e) => { e.stopPropagation(); openFolderList(); };
+  $("xFolderSave").onclick = saveFolderTarget;
+}
+
+function closeFolderList() {
+  const l = $("xFolderList");
+  if (l) l.classList.remove("open");
+}
+
+// ★ 点开下拉 = 先刷新一次，再展示。
+// 为什么不用原生 <select>：它一旦弹出就没法再更新内容，
+// 做不到"每次点开都拉一次最新的"。所以这里是自己画的一个面板。
+async function openFolderList() {
+  const list = $("xFolderList");
+  if (!list) return;
+  if (list.classList.contains("open")) { closeFolderList(); return; }
+  list.innerHTML = `<div class="ddItem off">载入中…</div>`;
+  list.classList.add("open");
+  let d;
+  try { d = await api("/api/xiaomi/folders"); }
+  catch (e) {
+    list.innerHTML = `<div class="ddItem off">读取失败：${esc((e && e.message) || e)}</div>`;
+    return;
+  }
+  folderData = d;
+  const cur = d.current || {};
+  if (!folderPending) folderPending = cur.folder_id || "";
+  const folders = d.folders || [];
+  // 顺带把统计刷新一下（同一次请求里就有）
+  const stat = $("xFolderStat");
+  if (stat) {
+    const s = d.stats || {};
+    stat.innerHTML =
+      `该文件夹内 <b>${s.scoped ?? "?"}</b> 条 ／ 小米笔记总计 <b>${s.total ?? "?"}</b> 条` +
+      (cur.folder_id ? "" : `　<span style="color:var(--warn)">尚未指定同步目标 —— 选好后点「设为同步目标」</span>`) +
+      (d.ok === false ? `　<span style="color:var(--err)">${esc(d.error || "")}</span>` : "");
+  }
+  if (!folders.length) {
+    list.innerHTML = `<div class="ddItem off">（没有读到文件夹）</div>`;
+    return;
+  }
+  list.innerHTML = folders.map(f => {
+    const sel = String(f.id) === String(folderPending);
+    return `<div class="ddItem${sel ? " sel" : ""}" data-fid="${esc(f.id)}">`
+         + `${esc(f.subject)}${sel ? " ✓" : ""}</div>`;
+  }).join("");
+  list.querySelectorAll(".ddItem[data-fid]").forEach(el => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      folderPending = el.dataset.fid;
+      closeFolderList();
+      renderFolderInner();      // 重画按钮文字（用刚选的名字）
+    };
+  });
+}
+
+async function saveFolderTarget() {
+  const fid = folderPending || ((folderData || {}).current || {}).folder_id || "";
+  const name = folderNameOf(fid);
+  if (!fid || !name) {
+    toast("先点开下拉，选一个文件夹", "err");
+    return;
+  }
+  await api("/api/xiaomi/folder", {folder_id: fid, folder_name: name});
+  folderRendered = false;
+  renderFolderBox(true);
+  refresh();
+}
+
+// 点空白处 / 按 Esc 关掉下拉
+document.addEventListener("click", (e) => {
+  if (!e.target.closest || !e.target.closest(".dd")) closeFolderList();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeFolderList();
+});
+
+async function renderFolderBox(force, connected){
+  const box = $("xFolderBox");
+  if (!box) return;
+  if (typeof connected === "boolean") xiaomiConnected = connected;
+  // 没登录就不去问文件夹列表 —— 否则必然 401，页面上会显示一条
+  // 看得人莫名其妙的"凭据不可用"，而其实是"没凭据还去请求"。
+  if (xiaomiConnected === false) {
+    if (folderState !== "nologin") {
+      box.innerHTML = `<div class="kv" style="color:var(--warn)">
+        先登录小米账号，登录后这里才会出现文件夹列表。</div>`;
+      folderState = "nologin";
+      folderRendered = true;
+    }
+    return;
+  }
+  if (folderState === "nologin") { folderRendered = false; folderState = ""; }
+  if (folderRendered && !force) return;
+  let d;
+  try { d = await api("/api/xiaomi/folders"); }
+  catch(e){ box.innerHTML = ""; return; }
+  folderState = "ready";
+  folderData = d;
+  folderPending = (d.current || {}).folder_id || "";
+  renderFolderInner();
+  folderRendered = true;
+}
+
+function renderLoginBoxes(g, x, cfg){
+  const gbox = $("gLoginBox");
+  const xbox = $("xLoginBox");
+  // 状态签名：没变就不重绘 —— 否则每 2 秒的刷新会把用户正在输入的文本框清掉
+  const gsig = [g.mode, g.connected, g.configured, g.token_kind, g.account,
+                g.channel, g.error].join("|");
+  const xsig = [x.mode, x.connected, x.account, x.cred_kind, x.auto_refresh,
+                x.cred_state, (x.profile || {}).has_login,
+                x.error, (x.cred_keys || []).join(",")].join("|");
+
+  // ---------------------------------------------------------- 微软
+  if (gbox.dataset.locked === "1") {
+    // 设备码流程进行中，别覆盖界面
+  } else if (gbox.dataset.sig !== gsig) {
+    gbox.dataset.sig = gsig;
+    const mock = g.mode === "mock";
+    // mock 模式下 connected 也是 true（假账号），所以必须先判 mock，
+    // 否则"切换到真实账号"的入口会被"已登录"分支吃掉 —— 之前就是这个 bug。
+    const parts = [];
+    if (mock) {
+      parts.push(`<div class="row" style="margin-bottom:10px">
+          <span class="kv">当前是 <b>mock 演示模式</b>：假账号、假数据，没有连你的真实便笺</span>
+          <button class="primary" id="gToReal">切换到真实账号</button></div>`);
+    } else if (g.connected) {
+      const kind = g.token_kind === "pasted"
+        ? `粘贴令牌，剩余约 ${g.expires_in_min} 分钟`
+        : "OAuth 令牌（自动续期）";
+      const ch = g.channel === "mail"
+        ? `<span style="color:var(--warn)">通道：${esc(g.channel_label)}——只能读，不能写</span>`
+        : `<span class="kv">通道：${esc(g.channel_label || "未探测")}</span>`;
+      // 已连接状态下也必须把错误显示出来 —— 否则用户只能对着空列表猜
+      const err = g.error
+        ? `<div class="kv" style="margin-top:6px;color:var(--err)">最近一次读取出错：${esc(g.error)}</div>`
+        : "";
+      parts.push(`<div class="row" style="align-items:flex-start">
+          <div style="flex:1">
+            <div class="kv">已登录 <b>${esc(g.account || "(账号未知)")}</b>　${kind}</div>
+            <div class="kv" style="margin-top:4px">${ch}</div>
+            ${err}
+          </div>
+          <button id="gOut">退出登录</button></div>`);
+    } else {
+      // 方式 B 放在最前面：它是页面按钮，而且一次授权之后长期自动续期
+      // 长篇说明一律收进 <details>：默认看不见，需要时点开 ——
+      // 页面上堆一大段教程，日常只会干扰（也让 docker 里第一次打开显得很劝退）。
+      parts.push(`
+        <div class="row">
+          <input id="gCid" placeholder="client_id（Azure 应用注册的 Application (client) ID）"
+                 style="flex:1;min-width:170px" value="${esc((cfg && cfg.graph && cfg.graph.client_id) || "")}">
+          <input id="gTenant" placeholder="tenant" style="width:110px"
+                 value="${esc((cfg && cfg.graph && cfg.graph.tenant) || "common")}">
+          <button id="gCidSave">保存</button>
+          <button class="primary" id="gIn"${g.configured ? "" : " disabled"}>开始设备码登录</button>
+        </div>
+        <div class="kv" id="gDevMsg" style="margin-top:7px"></div>
+        ${g.configured ? "" : `
+        <div class="kv" style="margin-top:8px;color:var(--warn)">
+          ⚠ 按钮是灰的：需要先填 client_id（免费、2 分钟、不用信用卡）。
+        </div>`}
+        <details style="margin-top:8px">
+          <summary class="kv" style="cursor:pointer">登录说明 / 怎么申请 client_id（点开）</summary>
+          <div class="kv" style="margin-top:8px;line-height:1.85">
+            点上面的按钮 → 页面给出一个码 → 在微软官方页面输码授权一次 →
+            之后 token 自动续期，不用再管。<br>
+            tenant 默认 <code>common</code>；若报 <code>AADSTS50059</code> 或提示账户类型不支持，
+            改成 <code>consumers</code> 保存后重试（纯个人账号专用端点）。
+          </div>
+          <ol class="kv" style="margin:10px 0 0 18px;padding:0;line-height:1.95">
+            <li>打开 <a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+              target="_blank" style="color:var(--accent2)">Azure 门户 → 应用注册</a>，用<b>同一个微软账号</b>登录</li>
+            <li>点 <b>新注册</b>；名称随便填；<b>受支持的账户类型</b>选含「
+              <b>个人 Microsoft 账户</b>」的那一项（很重要，选错你的账号用不了）</li>
+            <li><b>重定向 URI 留空</b>（设备码流程不需要它）→ 点 <b>注册</b></li>
+            <li>进左侧 <b>身份验证</b> → 把 <b>允许公共客户端流</b> 设为「<b>是</b>」
+              <br><span style="color:var(--warn)">⚠ 新版界面（标题写着 Authentication (Preview)）没有「添加平台」
+              入口 —— <b>不用找它，直接跳过</b>，只要「允许公共客户端流」是开着的就行。想找旧界面，页面顶部有一条
+              "switch to the old experience" 的链接。</span></li>
+            <li>进 <b>API 权限</b> → 添加权限 → <b>Microsoft Graph</b> → <b>委托的权限</b> →
+              搜 <code>ShortNotes</code> → 勾 <code>ShortNotes.ReadWrite</code> → <b>添加</b>
+              <br>（这一步顺便验证了权限到底存不存在。搜不到就改勾 <code>Mail.Read</code>，
+              程序会自动走邮箱便笺通道，那条只能读）</li>
+            <li>回 <b>概述</b> 页复制 <b>应用程序(客户端) ID</b> → 粘到左边输入框 → 点<b>保存</b> →
+              按钮就会亮起来</li>
+          </ol>
+        </details>
+        <div class="sep"></div>
+        <details>
+          <summary class="kv" style="cursor:pointer">
+            方式 A · 临时验证用（粘 Access token，约 1 小时过期，不能自动续期）
+          </summary>
+          <div class="kv" style="margin:6px 0">
+            打开 <a href="https://developer.microsoft.com/graph/graph-explorer" target="_blank"
+            style="color:var(--accent2)">Graph Explorer</a> 登录 →
+            地址栏改成 <code>https://graph.microsoft.com/v1.0/me/notes</code> →
+            右侧点 <b>Open the permissions panel</b>（左边那个搜索框是搜示例查询的，不是搜权限）→
+            在权限面板里搜 <code>ShortNotes</code> → 勾 <code>ShortNotes.ReadWrite</code> → Consent →
+            回 <b>Access token</b> 标签复制，整段贴进来。
+            <br><span style="color:var(--warn)">权限面板里如果搜不到 ShortNotes（列表加载不出来或没收录），
+            改勾 <code>Mail.Read</code> 也能读到便笺 —— 程序会自动切到邮箱便笺通道，但那条通道只能读、不能写。</span>
+          </div>
+          <textarea id="gTok" placeholder="粘贴 Access token（eyJ0eXAi...）"></textarea>
+          <div class="row" style="margin-top:7px">
+            <button id="gTokSave">用令牌登录</button>
+            <span class="kv" id="gTokMsg"></span>
+          </div>
+        </details>`);
+    }
+    gbox.innerHTML = parts.join("");
+
+    const gToReal = $("gToReal");
+    if (gToReal) gToReal.onclick = () => switchMode("graph", "real");
+    const gTokSave = $("gTokSave");
+    if (gTokSave) gTokSave.onclick = async () => {
+      const tok = $("gTok").value.trim();
+      if (!tok) { $("gTokMsg").textContent = "先粘一个令牌"; return; }
+      $("gTokMsg").textContent = "校验中…";
+      let r;
+      try { r = await api("/api/graph/token", {access_token: tok}); }
+      catch (e) { r = {ok: false, error: "请求失败：" + (e.message || e)}; }
+      $("gTokMsg").textContent = r.ok ? "登录成功" : ("失败：" + (r.error || ""));
+      gbox.dataset.sig = ""; refresh();
+    };
+    const gCidSave = $("gCidSave");
+    if (gCidSave) gCidSave.onclick = async () => {
+      await api("/api/config", {patch: {graph: {
+        client_id: $("gCid").value.trim(),
+        tenant: ($("gTenant") && $("gTenant").value.trim()) || "common",
+      }}});
+      gbox.dataset.sig = ""; refresh();
+    };
+    const gIn = $("gIn");
+    if (gIn) gIn.onclick = startGraphLogin;
+  }
+  const gOut = $("gOut");
+  if (gOut) gOut.onclick = async () => {
+    refreshSeq++;            // 同上：先作废在飞行中的刷新
+    await api("/api/graph/logout", {});
+    gbox.dataset.sig = ""; folderRendered = false; folderState = "";
+    refresh();
+  };
+
+  // ---------------------------------------------------------- 小米
+  if (xbox.dataset.sig === xsig) return;
+  xbox.dataset.sig = xsig;
+  const xmock = x.mode === "mock";
+  const xparts = [];
+  if (xmock) {
+    xparts.push(`<div class="row" style="margin-bottom:10px">
+        <span class="kv">当前是 <b>mock 演示模式</b>：假账号、假数据，没有连你的真实小米笔记</span>
+        <button class="primary" id="xToReal">切换到真实账号</button></div>`);
+  } else if (x.connected) {
+    const prof = x.profile || {};
+    const durable = !!prof.has_login;      // profile 里真的有登录态 => 能静默续期
+    const expired = x.cred_state === "expired";
+    const okState = x.cred_state === "ok";
+
+    // ★ 已登录时这里**只留一行状态 + 退出登录**。
+    // 所有"怎么登录"的说明、按钮、凭据字段清单都收进折叠块 ——
+    // 用户明确要求：除非退出登录，否则不需要看到那些登录提示。
+    // 真正要用到的登录方式都在"未登录"分支里，退出登录后自然出现。
+    const stateLine = expired
+      ? `<span style="color:var(--err)"><b>凭据已失效</b> —— 需要重新登录一次</span>`
+      : (okState
+          ? `<span style="color:var(--accent)">凭据有效</span>`
+          : `<span class="kv">凭据状态未知</span>`);
+
+    const durableLine = durable
+      ? `<div class="kv" style="margin-top:4px;color:var(--accent)">
+           ✅ 已建立持久登录态 —— 凭据过期会自动静默续期，不用再登录
+           ${prof.device_days_left ? `（可信设备还有 ${prof.device_days_left} 天）` : ""}
+         </div>`
+      : `<div class="kv" style="margin-top:4px;color:var(--warn)">
+           ⚠️ 还没建立持久登录态 —— 凭据一过期就得重新登录
+         </div>`;
+
+    xparts.push(`<div class="row" style="align-items:center">
+        <div style="flex:1">
+          <div class="kv">已登录 userId=<b>${esc(x.account || "?")}</b></div>
+          <div class="kv" style="margin-top:4px">${stateLine}</div>
+        </div>
+        <button id="xOut">退出登录</button>
+      </div>
+      <details style="margin-top:8px">
+        <summary class="kv" style="cursor:pointer">凭据与续期（一般用不到，点开）</summary>
+        <div class="kv" style="margin-top:8px">凭据来源：${esc(x.cred_kind)}</div>
+        ${durableLine}
+        <div class="kv" style="margin-top:4px;color:var(--dim)">
+          已保存字段：${(x.cred_keys || []).map(k => `<code>${esc(k)}</code>`).join(" ") || "（无）"}
+          ${x.cred_at ? `　·　获得于 ${new Date(x.cred_at * 1000).toLocaleString("zh-CN", {hour12:false})}` : ""}
+        </div>
+        <div class="kv" style="margin-top:4px">
+          可用续期路径：${(x.refresh_paths || []).map(p => `<code>${esc(p)}</code>`).join(" + ") || "（无 —— 只能重新登录）"}
+        </div>
+        <div class="row" style="margin-top:8px;flex-wrap:wrap">
+          <button id="xBrowserRefresh">静默续期</button>
+          <button id="xRefresh">检查凭据是否有效</button>
+        </div>
+        <div class="kv" id="xRefreshMsg" style="margin-top:6px"></div>
+        <div class="kv" style="margin-top:6px;color:var(--dim)">${esc(prof.conclusion || "")}</div>
+      </details>`);
+  } else {
+    const prof = x.profile || {};
+    xparts.push(`
+      <div class="kv" style="margin-bottom:8px">
+        <b>① 点下面的「浏览器登录」</b> —— 会弹出一个窗口，在里面登录
+        <code>i.mi.com</code>（可以扫码；如果要求安全验证，就在那个窗口里做完）。
+      </div>
+      <div class="kv" style="margin-bottom:8px">
+        <b>② 登录完成后窗口会自己关掉，凭据自动保存。</b>
+        这个动作<b>只需要做一次</b>：登录态会留在独立的浏览器 profile 里，
+        以后凭据过期时程序用无头浏览器自动换新，不会再打扰你。
+      </div>
+      <div class="row" style="margin-bottom:8px;flex-wrap:wrap">
+        <!-- ★ 扫码登录入口。后端 /api/xiaomi/qr/* 一直是好的，
+             但界面上一直没有按钮能触发它（只绑了 onclick，没人派发）——
+             直到准备 docker 部署才暴露：容器里没有浏览器，
+             「浏览器登录」必然失败，而扫码是**唯一**可行的登录方式。 -->
+        <button class="primary" id="xQrStart"
+                title="用小米手机扫码登录 —— 不需要本机浏览器。
+服务器 / 容器（docker）环境下请用这个">扫码登录（推荐）</button>
+        <button id="xBrowserLogin"
+                title="在本机弹出浏览器登录 i.mi.com —— 需要本机装有 Chrome/Edge。
+容器里没有浏览器，这条路走不通，请改用扫码登录">浏览器登录（本机）</button>
+        <button id="xBrowserRefresh" title="profile 里已有登录态时用">静默续期</button>
+      </div>
+      <div class="kv" id="xQrMsg" style="margin-bottom:8px"></div>
+      <div id="xQrBox" style="margin-bottom:8px"></div>
+      <div class="kv" id="xBrowserMsg" style="margin-bottom:8px"></div>
+      <div class="kv" style="margin-bottom:8px;color:var(--dim)">
+        profile 状态：${prof.profile_exists ? "目录已存在" : "还没创建"}　·
+        内含 i.mi.com 登录态：${prof.has_login
+          ? "<b style='color:var(--accent)'>有</b>（点「静默续期」即可，不用再登录）"
+          : "<b style='color:var(--warn)'>无</b>（所以必须先登录一次）"}
+      </div>
+      <div class="sep"></div>
+      <details>
+        <summary class="kv" style="cursor:pointer">
+          <b>为什么一定要用浏览器登录</b>
+        </summary>
+        <div class="kv" style="margin-top:8px">
+          扫码/终端登录产生的都是<b>新设备</b>，小米会要求做一次人工安全验证
+          （<code>isSecondValidation</code>），换出来的 token 调接口必 401 —— 绕不过去。
+          而浏览器登录窗口里的那次会话是<b>真实且已验证过</b>的，
+          它留下的登录态可以直接换新凭据。所以：
+          <b>登录一次，之后全自动</b>。
+        </div>
+      </details>
+      <div class="sep"></div>
+      <details>
+        <summary class="kv" style="cursor:pointer">
+          <b>或者手动粘贴 Cookie</b>（不推荐：会过期，且过期后还得再贴一次）
+        </summary>
+        <div class="kv" style="margin:8px 0 5px">
+          <b>① 主凭据</b>：i.mi.com 登录 → F12 → <b>Network</b> → 任一 <code>/note/</code> 请求 →
+          复制请求头里的 <b>Cookie</b> 整段
+        </div>
+        <div class="kv" style="margin-bottom:6px">
+          <b>② 续期凭据</b>：F12 → <b>Application</b> → Cookies →
+          <code>https://account.xiaomi.com</code> → 复制
+          <code style="color:var(--accent)">passToken</code> 和
+          <code style="color:var(--accent)">deviceId</code>，按
+          <code>passToken=xxx; deviceId=xxx</code> 贴过来
+        </div>
+        <div class="kv" style="margin-bottom:6px">两次可以分开贴，会合并保留。</div>
+        <textarea id="xCk" placeholder="serviceToken=...; userId=...; passToken=...; deviceId=..."></textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="primary" id="xSave">验证并保存</button>
+          <span class="kv" id="xMsg"></span>
+        </div>
+      </details>`);
+  }
+  xbox.innerHTML = xparts.join("");
+  const xToReal = $("xToReal");
+  if (xToReal) xToReal.onclick = () => switchMode("xiaomi", "real");
+  const xQrStart = $("xQrStart");
+  if (xQrStart) xQrStart.onclick = startQrLogin;
+  const xBrowserRefresh = $("xBrowserRefresh");
+  if (xBrowserRefresh) xBrowserRefresh.onclick = async () => {
+    const msg = $("xBrowserMsg") || $("xRefreshMsg");
+    xBrowserRefresh.disabled = true; xBrowserRefresh.textContent = "读取中（要开一次无头浏览器，约 25 秒）…";
+    if (msg) { msg.style.color = "var(--dim)"; msg.textContent = "正在用无头浏览器打开 i.mi.com 换新凭据…"; }
+    let r;
+    try { r = await api("/api/xiaomi/browser-refresh", {}); }
+    catch (e) { r = {ok: false, error: (e && e.message) || String(e)}; }
+    xBrowserRefresh.disabled = false; xBrowserRefresh.textContent = "静默续期";
+    if (msg) {
+      msg.style.color = r.ok ? "var(--accent)" : "var(--err)";
+      msg.textContent = r.ok
+        ? "✅ 续期成功：已用浏览器 profile 换到新的可用凭据"
+        : ("❌ " + (r.error || ""));
+    }
+    if (r.ok) { xbox.dataset.sig = ""; folderRendered = false; refresh(); }
+  };
+
+  const xBrowserLogin = $("xBrowserLogin");
+  if (xBrowserLogin) xBrowserLogin.onclick = async () => {
+    const msg = $("xBrowserMsg") || $("xRefreshMsg");
+    xBrowserLogin.disabled = true; xBrowserLogin.textContent = "正在打开浏览器…";
+    let r;
+    try { r = await api("/api/xiaomi/browser-login", {}); }
+    catch (e) { r = {ok: false, error: (e && e.message) || String(e)}; }
+    xBrowserLogin.disabled = false; xBrowserLogin.textContent = "浏览器登录（一次，永久免登录）";
+    if (msg) {
+      msg.style.color = r.ok ? "var(--accent)" : "var(--err)";
+      msg.textContent = r.ok
+        ? "已弹出浏览器窗口 —— 请在里面登录 i.mi.com（可扫码）。登录完成后本页会自动变绿。"
+        : ("打开失败：" + (r.error || ""));
+    }
+    // 登录窗口是**另一个进程**，它写完凭据后本页每 2 秒的轮询自然会读到，
+    // 所以不需要额外的轮询逻辑 —— 只需要把状态签名清掉，强制重绘一次。
+    if (r.ok) { xbox.dataset.sig = ""; folderRendered = false; }
+  };
+  const xRefresh = $("xRefresh");
+  if (xRefresh) xRefresh.onclick = async () => {
+    // 改成**只读体检**：只打一次笔记接口看还能不能读。
+    // 之前那个"测试自动续期"会真的走 serviceLogin 去换 token ——
+    // 实测小米会因此弹图形验证码，甚至把现有会话作废（触发风控）。
+    // 那种操作不该由用户随手点。
+    const msg = $("xRefreshMsg");
+    xRefresh.disabled = true; xRefresh.textContent = "检查中…";
+    if (msg) { msg.textContent = "只读检查凭据是否还有效…"; msg.style.color = "var(--dim)"; }
+    let r;
+    try { r = await api("/api/xiaomi/check", {}); }
+    catch (e) { r = {ok: false, error: "请求失败：" + ((e && e.message) || e)}; }
+    xRefresh.disabled = false; xRefresh.textContent = "检查凭据是否有效";
+    if (msg) {
+      msg.style.color = r.ok ? "var(--accent)" : "var(--err)";
+      msg.textContent = r.ok
+        ? "✅ 凭据有效，数据能正常读取"
+        : ("❌ " + (r.error || "").slice(0, 150));
+    }
+    refresh();
+  };
+  const xSave = $("xSave");
+  if (xSave) xSave.onclick = async () => {
+    $("xMsg").textContent = "验证中…";
+    let r;
+    try { r = await api("/api/xiaomi/cookie", {cookie: $("xCk").value}); }
+    catch (e) { r = {ok: false, error: "请求失败：" + (e.message || e)}; }
+    $("xMsg").textContent = r.ok ? "已保存" : ("失败：" + (r.error || ""));
+    if (r.ok) { xbox.dataset.sig = ""; folderRendered = false; refresh(); }
+  };
+  const xOut = $("xOut");
+  if (xOut) xOut.onclick = async () => {
+    refreshSeq++;            // 立刻作废所有在飞行中的刷新，避免旧状态回跳
+    await api("/api/xiaomi/logout", {});
+    xbox.dataset.sig = ""; folderRendered = false; folderState = "";
+    refresh();
+  };
+}
+
+// 切换连接模式。换连接器会重建后端组件，所以顺手复位所有缓存的渲染状态
+async function switchMode(side, mode){
+  const r = await api("/api/mode", {[side]: mode});
+  if (r && r.ok === false) { alert(r.error || "切换失败"); return; }
+  $("gLoginBox").dataset.sig = "";
+  $("xLoginBox").dataset.sig = "";
+  folderRendered = false;
+  refresh();
+}
+
+// 小米扫码登录：后端不会阻塞，二维码拿回来后这里每 2 秒问一次进度
+let qrPolling = null;
+async function startQrLogin(){
+  const box = $("xQrBox");
+  $("xQrMsg").textContent = "获取二维码…";
+  let r;
+  try { r = await api("/api/xiaomi/qr/start", {}); }
+  catch (e) { r = {ok: false, error: (e && e.message) || String(e)}; }
+  if (!r.ok) { $("xQrMsg").textContent = "失败：" + (r.error || ""); return; }
+  $("xQrMsg").textContent = "";
+  box.innerHTML = `
+    <div style="background:#fff;padding:12px;border-radius:10px;width:200px;height:200px;
+                display:flex;align-items:center;justify-content:center">
+      ${r.qr_svg}
+    </div>
+    <div class="kv" style="margin-top:8px">
+      ${esc(r.tips || "用小米手机：设置 → 小米账号 → 扫一扫（或相机扫码）")}
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="xQrCancel">取消</button>
+      <span class="kv" id="xQrState">等待扫码…</span>
+    </div>`;
+  const svg = box.querySelector("svg");
+  if (svg) {
+    svg.removeAttribute("data-w"); svg.removeAttribute("data-h");
+    svg.setAttribute("width", "100%"); svg.setAttribute("height", "100%");
+  }
+  $("xQrCancel").onclick = async () => {
+    await api("/api/xiaomi/qr/cancel", {});
+    if (qrPolling) { clearInterval(qrPolling); qrPolling = null; }
+    box.innerHTML = ""; $("xQrMsg").textContent = "已取消";
+  };
+  if (qrPolling) clearInterval(qrPolling);
+  qrPolling = setInterval(async () => {
+    const st = $("xQrState");
+    if (!st) { clearInterval(qrPolling); qrPolling = null; return; }
+    let s;
+    try { s = await api("/api/xiaomi/qr/status"); } catch (e) { return; }
+    if (s.phase === "waiting") { st.textContent = "等待扫码…"; return; }
+    clearInterval(qrPolling); qrPolling = null;
+    if (s.phase === "success") {
+      st.textContent = "登录成功";
+      box.innerHTML = "";
+      $("xLoginBox").dataset.sig = "";
+      folderRendered = false;
+      refresh();
+    } else {
+      st.textContent = "失败：" + (s.message || "未知原因");
+    }
+  }, 2000);
+}
+
+async function startGraphLogin(){
+  const box = $("gLoginBox");
+  const r = await api("/api/graph/login/start", {});
+  if (r.status === "error" || !r.user_code) {
+    $("gDevMsg").textContent = r.error || "启动失败";
+    return;
+  }
+  box.dataset.locked = "1";     // 锁定，别让 2 秒刷新把设备码覆盖掉
+  box.innerHTML = `
+    <div class="code">1. 打开 <a href="${esc(r.verification_uri)}" target="_blank"
+      style="color:var(--accent2)">${esc(r.verification_uri)}</a><br>
+      2. 输入代码 <b style="font-size:15px">${esc(r.user_code)}</b></div>
+    <div class="row" style="margin-top:8px">
+      <button class="primary" id="gPoll">我已授权，检查状态</button>
+      <button id="gCancel">取消</button>
+      <span class="kv" id="gMsg"></span></div>`;
+  const finish = () => { box.dataset.locked = ""; box.dataset.sig = ""; };
+  $("gCancel").onclick = finish;
+  $("gPoll").onclick = async () => {
+    $("gMsg").textContent = "检查中…";
+    const p = await api("/api/graph/login/poll", {});
+    if (p.status === "pending") $("gMsg").textContent = "还没授权，稍后再点一次";
+    else if (p.status === "success") { finish(); refresh(); }
+    else $("gMsg").textContent = p.error || "失败";
+  };
+}
+
+// ---------------------------------------------------------------- 交互
+// 自动同步开关按钮：点一下开、点一下关。
+// 打开后**不用刷新页面**：后台每轮都会重拉列表并更新 last_notes，
+// 前端本来就在每 5 秒轮询 /api/state + /api/notes，所以列表会自己动起来。
+// 一个按钮、两种职能（自动同步开关 + 中止），**点下去做什么由当前状态决定**：
+//   自动同步开着 + 正在跑 → 中止当前这一轮（开关保持开着）
+//   其他情况             → 开 / 关自动同步
+// 状态从 lastState 取（refresh() 每次都会更新它），不要去猜按钮上的文字。
+$("btnAuto").onclick = async () => {
+  const b = $("btnAuto");
+  const st = lastState || {};
+  const on = !!st.auto_sync;
+  const busy = !!st.busy;
+  b.disabled = true;
+
+  // ---- 正在跑：这次点击是"中止本轮" ----
+  if (on && busy) {
+    let r;
+    try { r = await api("/api/sync/abort", {}); }
+    catch (e) { r = {ok: false, error: (e && e.message) || String(e)}; }
+    if (!r || r.ok === false) {
+      toast("中止失败：" + ((r && r.error) || "未知原因"), "err");
+      b.disabled = false;
+    } else {
+      toast("已请求中止 —— 当前这条处理完就停，自动同步保持开着", "ok");
+    }
+    refresh();
+    return;
+  }
+
+  // ---- 否则：开 / 关自动同步 ----
+  const want = !on;
+  b.textContent = want ? "正在开启…" : "正在关闭…";
+  let r;
+  try { r = await api("/api/config", {patch: {auto_sync: want}}); }
+  catch (e) { r = {ok: false, error: (e && e.message) || String(e)}; }
+  if (!r || r.ok === false) {
+    alert("操作失败：\n" + ((r && r.error) || "未知原因"));
+  } else {
+    toast(want ? "自动同步已开启 —— 后台会每隔几秒自动拉取并同步一轮"
+               : "自动同步已关闭", "ok");
+  }
+  refresh();
+};
+// 全量备份：一个按钮、两种去向 —— 下载到本机，或存到服务所在的本地文件夹。
+// 两者走**同一个后端导出函数**，内容完全一致，只是去向不同。
+$("btnBackup").onclick = async () => {
+  const toFile = !await ask(
+    "全量备份\n\n" +
+    "内容：两端全部记录（含正文与时间字段）+ 配对/基线状态 + 回收站 + 配置。\n" +
+    "**不含任何凭据**（cookie/token 不进备份，丢了重新登录即可）。\n\n" +
+    "【确定】保存到**服务所在的本地文件夹**（data/backups/）\n" +
+    "【取消】下载到**本机**（浏览器另存为）");
+  const b = $("btnBackup");
+  b.disabled = true;
+  try {
+    if (toFile) {
+      b.textContent = "导出中（约 20 秒）…";
+      let r;
+      try { r = await api("/api/backup/save", {}); }
+      catch (e) { r = {ok: false, error: (e && e.message) || String(e)}; }
+      if (!r || r.ok === false) {
+        alert("备份失败：\n" + ((r && r.error) || "未知原因"));
+      } else {
+        alert(`已备份到：\n${r.path}\n\n` +
+              `大小：${Math.round(r.bytes / 1024)} KB\n` +
+              `便笺 ${r.counts.graph} 条 / 小米 ${r.counts.xiaomi} 条 / 映射 ${r.counts.links} 条`);
+      }
+    } else {
+      b.textContent = "导出中（约 20 秒）…";
+      // 走 fetch + Blob 而不是直接跳转：这样才能在失败时把错误读出来告诉用户
+      const resp = await fetch(API_BASE + "/api/backup");
+      if (!resp.ok) {
+        let msg = "HTTP " + resp.status;
+        try { msg = (await resp.json()).error || msg; } catch (e) {}
+        throw new Error(msg);
+      }
+      const cd = resp.headers.get("Content-Disposition") || "";
+      const m = /filename="([^"]+)"/.exec(cd);
+      const name = m ? m[1] : "sticky-mi-sync-backup.json";
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast(`已下载备份 ${name}（${Math.round(blob.size / 1024)} KB）`, "ok");
+    }
+  } catch (e) {
+    alert("备份失败：\n" + ((e && e.message) || String(e)));
+  }
+  b.disabled = false; b.textContent = "备份";
+  refresh();
+};
+
+$("btnFetch").onclick = async () => {
+  $("btnFetch").disabled = true; $("btnFetch").textContent = "读取中…";
+  const r = await api("/api/fetch", {});
+  $("btnFetch").disabled = false; $("btnFetch").textContent = "只读拉取两端列表";
+  if (r.errors && r.errors.length) alert("部分失败：\n" + r.errors.join("\n"));
+  refresh();
+};
+// （原「预演一次」按钮已移除 —— 预演仍有入口：设置里的「全局预演模式」勾选框。）
+
+// 中止当前同步。
+// **不是"立即掐断"** —— 后端会在"当前这条处理完、下一条开始前"停下，
+// 因为写便笺写到一半被打断会留下半截内容。已完成的不回滚，
+// 下次点同步会从断点继续。
+// （独立的「中止」按钮已删除 —— 它的功能合并进了上面的「自动同步」按钮：
+//   自动同步开着且正在跑时，点那个按钮就是中止本轮。）
+
+// （原「只同步改动内容」按钮及其处理函数已移除 —— 功能已验证通过。
+//   后端能力保留：POST /api/sync {"changed_only": true} 仍可用。）
+
+// 设置模块默认收起 —— 这些是一次性配置，日常不需要占着屏幕。
+$("cfgToggle").onclick = () => {
+  const box = $("cfgBox"), btn = $("cfgToggle");
+  const open = box.style.display !== "block";
+  box.style.display = open ? "block" : "none";
+  btn.textContent = open ? "收起" : "展开";
+};
+
+// 退出"访问密码"这一层的登录（浏览器会话）。
+// 不影响小米/微软的登录态 —— 那两套是服务端保存的，和谁来打开页面无关。
+$("btnLogout").onclick = async () => {
+  if (!await ask("退出登录？\n\n下次打开这个页面需要重新输入访问密码。\n"
+               + "不会影响已保存的小米 / 微软登录态，也不会停止后台同步。")) return;
+  try { await api("/api/auth/logout", {}); } catch (e) {}
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  appStarted = false;
+  location.reload();          // 重载后 boot() 会重新弹登录页
+};
+
+$("btnSaveCfg").onclick = async () => {
+  await api("/api/config", {patch:{
+    sync_interval_sec: Number($("interval").value) || 5,
+    dry_run: $("dryToggle").checked,
+    initial_pairing: $("pairing").value,
+    conflict_policy: $("conflict").value,
+  }});
+  refresh();
+};
+document.querySelectorAll("[data-mock]").forEach(b => b.onclick = async () => {
+  const [side, act] = b.dataset.mock.split(":");
+  const text = $("mockText").value || "来自 " + side + " 的新内容 " + new Date().toLocaleTimeString();
+  await api("/api/mock/" + act, {side, text});
+  $("mockText").value = "";
+  refresh();
+});
+document.addEventListener("click", async (e) => {
+  const del = e.target.closest("[data-del]"); if (!del) return;
+  const [side, id] = del.dataset.del.split(":");
+  if (!await ask("删除这一条？\n" + id)) return;
+  await api("/api/mock/del", {side, id});
+  refresh();
+});
+
+// ---------------------------------------------------------------- 详情面板
+// 只读展示。刻意不放任何 input/textarea —— 想改内容得去便笺或小米那边改，
+// 改完由同步器搬过去；在同步器里直接编辑会绕过"哪一侧是权威源"的判断。
+async function openDetail(key){
+  const d = $("detail");
+  let r;
+  try { r = await api("/api/note?key=" + encodeURIComponent(key)); }
+  catch (e) { r = {ok: false, error: (e && e.message) || String(e)}; }
+  if (!r || r.ok === false) {
+    alert("读取失败：" + ((r && r.error) || "未知原因"));
+    return;
+  }
+  $("detailTitle").textContent =
+    (r.graph && r.graph.title) || (r.xiaomi && r.xiaomi.title) || "(空)";
+
+  const block = (name, s) => {
+    if (!s) {
+      return `<div style="margin-bottom:18px">
+        <h4>${name}</h4>
+        <div class="kv" style="color:var(--warn)">这一侧没有这条记录</div>
+      </div>`;
+    }
+    return `<div style="margin-bottom:18px">
+      <h4>${name} · ${s.chars} 字</h4>
+      <div class="detailText">${esc(s.text) || "（空）"}</div>
+      <div class="detailMeta">id：${esc(s.id)}<br>时间：${esc(s.time || "—")}</div>
+    </div>`;
+  };
+  // 两侧内容一致 → **只画一个框**。重复显示一模一样的内容没有意义，
+  // 还占掉一屏、逼着用户自己比对。
+  // 不一致（或只有一侧有）才两侧都列出来，方便对照。
+  // 判据用后端给的 `same`（同步引擎同一个 content_hash），
+  // 与列表里指示灯的判据**完全一致** —— 灯是双绿的就一定只画一个框。
+  if (r.same === true) {
+    const s = r.graph || r.xiaomi;
+    $("detailBody").innerHTML =
+      `<div style="margin-bottom:18px">
+        <h4>内容（两侧一致）· ${s.chars} 字</h4>
+        <div class="detailText">${esc(s.text) || "（空）"}</div>
+        <div class="detailMeta">
+          微软便笺 id：${esc((r.graph || {}).id || "—")}　时间：${esc((r.graph || {}).time || "—")}<br>
+          小米笔记 id：${esc((r.xiaomi || {}).id || "—")}　时间：${esc((r.xiaomi || {}).time || "—")}
+        </div>
+      </div>`;
+  } else {
+    $("detailBody").innerHTML =
+      block("微软便笺", r.graph) + block("小米笔记", r.xiaomi);
+  }
+  d.classList.add("open");
+  d.setAttribute("aria-hidden", "false");
+  d.dataset.key = key;
+}
+function closeDetail(){
+  const d = $("detail");
+  d.classList.remove("open");
+  d.setAttribute("aria-hidden", "true");
+  d.dataset.key = "";
+}
+$("detailClose").onclick = closeDetail;
+$("detailCopy").onclick = async () => {
+  const k = $("detail").dataset.key;
+  if (!k) return;
+  const btn = $("detailCopy");
+  try {
+    const r = await api("/api/note?key=" + encodeURIComponent(k));
+    const t = (r && r.ok)
+      ? ((r.graph && r.graph.text) || (r.xiaomi && r.xiaomi.text) || "")
+      : "";
+    await navigator.clipboard.writeText(t);
+    btn.textContent = "已复制";
+  } catch (e) {
+    btn.textContent = "复制失败";
+  }
+  setTimeout(() => { btn.textContent = "复制"; }, 1500);
+};
+
+// 选中工具条的状态刷新。
+// 勾选数、按钮可用性都在这里统一更新 —— 只有一处真相，不会出现
+// "按钮亮了但其实没选中"这种状态不一致。
+function updatePickUI() {
+  const n = picked.size;
+  const autoOn = !!(lastState && lastState.auto_sync);
+  const busy = !!(lastState && lastState.busy);
+  const c = $("pickCount"); if (c) c.textContent = String(n);
+
+  // 删除选中：只看有没有勾选
+  const d = $("btnDelPicked");
+  if (d) d.disabled = n === 0;
+
+  // ★ 同步选中：**自动同步开着时必须置灰**。
+  // 理由和当初"立即同步"要失效一样 —— 手动改几条的同时后台那一轮也在写，
+  // 两边会撞在一起（乐观锁互相顶掉，表现为莫名其妙的写入失败）。
+  // 服务端也会用 engine.busy 挡（返回 409），但按钮先灰掉更直观、不用等报错。
+  const s = $("btnSyncPicked");
+  if (s) {
+    s.disabled = n === 0 || autoOn;
+    s.title = autoOn
+      ? "自动同步已开启 —— 先把它关掉再手动同步选中的记录（否则会和后台那一轮撞车）"
+      : "把选中的记录同步成两侧一致：一侧缺就补建到另一侧；两侧内容不同则以**最后修改的那一侧**为准覆盖另一侧";
+  }
+
+  const h = $("pickHint");
+  if (h) {
+    if (n === 0) h.textContent = "（勾选左侧方框后可用）";
+    else if (autoOn) h.textContent = "自动同步开启中：「同步选中」暂不可用（先关掉它）";
+    else if (busy) h.textContent = "正在同步中…";
+    else h.textContent = "";
+  }
+}
+
+// 点击列表行 → 打开详情；点复选框 → 只切换选中，**不要弹详情**。
+document.addEventListener("click", async (e) => {
+  // 复选框：交给 change 事件处理选中态；这里只负责别让它冒泡去开详情
+  if (e.target.closest("[data-pick]")) {
+    e.stopPropagation();
+    return;
+  }
+  const li = e.target.closest("#mergedList li[data-key]");
+  if (li && li.dataset.key) openDetail(li.dataset.key);
+});
+
+// 复选框的选中态用 change 事件（点标签、键盘空格都能触发）
+$("mergedList").addEventListener("change", (e) => {
+  const box = e.target.closest("[data-pick]");
+  if (!box) return;
+  const key = box.dataset.pick;
+  if (box.checked) picked.add(key); else picked.delete(key);
+  const li = box.closest("li");
+  if (li) li.classList.toggle("picked", box.checked);
+  updatePickUI();
+});
+
+// 全选 / 取消全选
+$("btnPickAll").onclick = () => {
+  const boxes = Array.from(document.querySelectorAll("#mergedList [data-pick]"));
+  const allOn = boxes.length > 0 && boxes.every(b => b.checked);
+  for (const b of boxes) {
+    b.checked = !allOn;
+    if (b.checked) picked.add(b.dataset.pick); else picked.delete(b.dataset.pick);
+    const li = b.closest("li");
+    if (li) li.classList.toggle("picked", b.checked);
+  }
+  updatePickUI();
+};
+
+// 删除选中：两端同删、先入回收站，逐条执行。
+$("btnDelPicked").onclick = async () => {
+  const keys = Array.from(picked);
+  if (!keys.length) return;
+  if (!await ask(`确定删除选中的 ${keys.length} 条吗？\n\n` +
+                 "两端会同时删除（哪端有就删哪端），内容会先存进回收站，之后可以恢复。")) return;
+  const b = $("btnDelPicked");
+  b.disabled = true; b.textContent = `删除中（${keys.length} 条）…`;
+  let r;
+  try { r = await api("/api/notes/delete-selected", {keys}); }
+  catch (err) { r = {ok: false, error: (err && err.message) || String(err)}; }
+  b.disabled = false; b.textContent = "删除选中";
+  if (!r || r.ok === false) {
+    toast("批量删除失败：" + ((r && r.error) || "未知原因"), "err");
+  } else {
+    const bad = (r.results || []).filter(x => !x.ok);
+    picked.clear();
+    toast(`已移入回收站 ${r.succeeded}/${r.total} 条` +
+          (bad.length ? `（${bad.length} 条失败）` : "（可在回收站恢复）"),
+          bad.length ? "err" : "ok");
+  }
+  refresh();
+};
+
+// 同步选中：一侧缺就补建到另一侧；两侧不同则以**较新的一侧**为准覆盖另一侧。
+$("btnSyncPicked").onclick = async () => {
+  const keys = Array.from(picked);
+  if (!keys.length) return;
+  if (!await ask(`把选中的 ${keys.length} 条同步成两侧一致？\n\n` +
+                 "· 只有一侧有 → 在另一侧补建一条\n" +
+                 "· 两侧都有但内容不同 → 以**最后修改的那一侧**为准覆盖另一侧\n" +
+                 "  （和列表里指示灯「绿的那侧」是同一个判据）")) return;
+  const b = $("btnSyncPicked");
+  b.disabled = true; b.textContent = `同步中（${keys.length} 条）…`;
+  let r;
+  try { r = await api("/api/sync/selected", {keys}); }
+  catch (err) { r = {ok: false, error: (err && err.message) || String(err)}; }
+  b.disabled = false; b.textContent = "同步选中";
+  if (!r || r.ok === false) {
+    toast("同步选中失败：" + ((r && r.error) || "未知原因"), "err");
+  } else {
+    const lines = (r.results || []).map(x =>
+      (x.ok ? "· " + (x.actions || []).join("；") : "· 失败：" + x.error));
+    if (lines.length) alert(`同步选中（成功 ${r.succeeded}/${r.total}）：\n\n` + lines.join("\n"));
+    toast(`同步选中完成：${r.succeeded}/${r.total} 条`, "ok");
+  }
+  refresh();
+};
+
+// ---------------------------------------------------------------- 回收站
+let trashOpen = false;
+$("trashToggle").onclick = () => {
+  trashOpen = !trashOpen;
+  $("trashBox").style.display = trashOpen ? "block" : "none";
+  $("trashToggle").textContent = trashOpen ? "收起" : "展开";
+  if (trashOpen) renderTrash();
+};
+
+async function renderTrash(){
+  let d;
+  try { d = await api("/api/trash"); }
+  catch (e) { $("trashList").innerHTML = `<li class="muted">读取失败：${esc(e.message||e)}</li>`; return; }
+  const items = (d && d.items) || [];
+  $("trashCount").textContent = `(${items.length})`;
+  if (!items.length) {
+    $("trashList").innerHTML = '<li class="muted">（空）</li>';
+    return;
+  }
+  $("trashList").innerHTML = items.map(it => {
+    const t = new Date((it.deleted_at || 0) * 1000)
+      .toLocaleString("zh-CN", {hour12: false});
+    const title = it.graph_title || it.xiaomi_title || "(空)";
+    // 用两盏灯如实标出**删除前**这一侧到底有没有这条 ——
+    // 恢复时会照这个还原，所以先让用户看清
+    const lamps =
+      `<span class="lamps" title="删除前：左微软 / 右小米">` +
+      `<span class="lamp ${it.graph_exists ? "on" : "off"}"></span>` +
+      `<span class="lamp ${it.xiaomi_exists ? "on" : "off"}"></span></span>`;
+    const state = it.restored
+      ? '<span class="tag ok">已恢复</span>'
+      : `<button data-trestore="${it.tid}" title="按删除前的状态还原">恢复</button>`;
+    return `<li>
+      <span class="t">${esc(title)}</span>
+      <span class="kv">${esc(t)}</span>
+      ${lamps}
+      ${state}
+      <button class="mini" data-tpurge="${it.tid}" title="彻底删除（不可恢复）">×</button>
+    </li>`;
+  }).join("");
+}
+
+document.addEventListener("click", async (e) => {
+  const rs = e.target.closest("[data-trestore]");
+  if (rs) {
+    e.stopPropagation();
+    const tid = Number(rs.dataset.trestore);
+    rs.disabled = true; rs.textContent = "恢复中…";
+    let r;
+    try { r = await api("/api/trash/restore", {tid}); }
+    catch (err) { r = {ok: false, error: (err && err.message) || String(err)}; }
+    if (!r || r.ok === false) alert("恢复失败：" + ((r && r.error) || "未知原因"));
+    else if (r.errors && r.errors.length) alert("部分恢复失败：\n" + r.errors.join("\n"));
+    refresh(); renderTrash();
+    return;
+  }
+  const pg = e.target.closest("[data-tpurge]");
+  if (pg) {
+    e.stopPropagation();
+    const tid = Number(pg.dataset.tpurge);
+    if (!await ask("从回收站彻底删除？\n\n这一步不可逆，之后无法再恢复。")) return;
+    let r;
+    try { r = await api("/api/trash/purge", {tid}); }
+    catch (err) { r = {ok: false, error: (err && err.message) || String(err)}; }
+    if (!r || r.ok === false) toast("操作失败：" + ((r && r.error) || "未知原因"), "err");
+    else toast("已彻底删除", "ok");
+    renderTrash();
+  }
+});
+
+// ================================================================ 登录闸门
+//
+// 服务端对**所有** /api/* 都要求已登录（只放行 /api/auth/* 那几个），
+// 所以这一关不是装饰：不过它，前端一个字节的数据都拿不到。
+//
+// 首次使用没有密码 → 引导设置；设过 → 登录。
+// **忘记密码没有邮箱找回** —— 只能到跑这个服务的机器上执行 CLI，
+// 卡片上直接写清楚怎么做（自托管产品的通行做法：宿主机 shell 才是那个"钥匙"）。
+
+let appStarted = false;          // 没过闸门之前，轮询一律不跑
+
+function hideGate(){ $("loginGate").style.display = "none"; }
+
+function showGate(mode){
+  const needsSetup = mode === "setup";
+  const g = $("loginGate");
+  $("gateBody").innerHTML = `
+    <div class="kv" style="margin:8px 0 2px;line-height:1.75">
+      ${needsSetup
+        ? "第一次使用，先给这个服务设一个<b>访问密码</b>。之后每次打开页面都要输它。"
+        : "请输入访问密码。"}
+    </div>
+    <input type="password" id="gatePw"
+           placeholder="${needsSetup ? "设置访问密码（至少 8 位）" : "访问密码"}"
+           autocomplete="${needsSetup ? "new-password" : "current-password"}">
+    ${needsSetup ? `<input type="password" id="gatePw2" placeholder="再输一次"
+           autocomplete="new-password">` : ""}
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="gateGo">${needsSetup ? "设置并进入" : "登录"}</button>
+      <span class="kv" id="gateMsg"></span>
+    </div>
+    ${needsSetup ? "" : `
+    <div class="kv" style="margin-top:14px;color:var(--dim);line-height:1.8">
+      <b>忘记密码？</b>没有邮箱找回 —— 到<b>运行这个服务的机器</b>上执行：<br>
+      <code>python server.py --set-password</code><br>
+      容器里：<code>docker compose exec sticky-mi-sync python server.py --set-password</code><br>
+      （会提示你输入新密码，输入内容不会进 shell 历史；改完所有已登录的浏览器都会被踢下线）
+    </div>`}`;
+  g.style.display = "flex";
+  const submit = () => submitGate(needsSetup);
+  $("gateGo").onclick = submit;
+  $("gatePw").onkeydown = (e) => { if (e.key === "Enter") submit(); };
+  if ($("gatePw2")) $("gatePw2").onkeydown = (e) => { if (e.key === "Enter") submit(); };
+  try { $("gatePw").focus(); } catch (e) {}
+}
+
+async function submitGate(needsSetup){
+  const msg = $("gateMsg");
+  const pw = $("gatePw").value || "";
+  if (needsSetup && pw !== ($("gatePw2").value || "")) {
+    msg.textContent = "两次输入不一致"; return;
+  }
+  msg.textContent = "提交中…";
+  let r;
+  try { r = await api(needsSetup ? "/api/auth/setup" : "/api/auth/login", {password: pw}); }
+  catch (e) { r = {ok: false, error: (e && e.message) || String(e)}; }
+  if (!r || r.ok === false) {
+    msg.textContent = (r && r.error) || "失败";
+    return;
+  }
+  lastState = {};                  // 换用户/换会话，旧状态作废
+  hideGate();
+  startApp();
+}
+
+// 轮询间隔 5 秒（原来是 2 秒）。同步状态的可见变化本来就没那么快，
+// 2 秒一次纯属浪费；更要命的是预览面板可能同时开着好几个，
+// 每个都在按自己的节奏建连、请求，开销是直接叠加的。
+const POLL_MS = 5000;
+let pollTimer = null;
+
+function startApp(){
+  if (appStarted) return;
+  appStarted = true;
+  hideGate();
+  refresh();
+  if (!pollTimer) pollTimer = setInterval(refresh, POLL_MS);
+}
+
+// 启动：先问一次鉴权状态，再决定进应用还是弹闸门。
+// 幂等，重复调用安全。
+async function boot(){
+  // ★ 页面不是从后端本身加载的（双击 index.html 走 file://、或某些预览面板），
+  //   同源请求必然打空，跨域又会被 CORS 挡下。偏偏下面那个 catch 会把错误吞掉，
+  //   于是登录框照常显示 —— 用户输入密码、点「登录」，才蹦出一句
+  //   "Failed to fetch"，看着像是密码错了。这里直接从根上跳回后端地址。
+  if (location.protocol === "file:") { location.replace(DEFAULT_BACKEND + "/"); return; }
+  let st = null;
+  try { st = await api("/api/auth/status"); }
+  catch (e) { lastErr = String((e && e.message) || e); }
+  if (st && st.logged_in) { startApp(); return; }
+  appStarted = false;
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  // 拿不到任何状态 = 根本没连上。这时**不能**显示登录框：
+  // 那会让用户以为要输密码，其实输什么都没用。
+  if (!st) { showBackendError(new Error(lastErr || "无法连接后端")); return; }
+  showGate(st.needs_setup ? "setup" : "login");
+}
+
+boot();
+
+// 页面不可见时**完全不请求**。
+// 标签页切走、窗口最小化、预览面板收起来 —— 这些情况下一次轮询都不该发。
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  } else if (appStarted) {          // 没过闸门就什么都不做
+    refresh();
+    if (!pollTimer) pollTimer = setInterval(refresh, POLL_MS);
+  }
+});
+</script>
+</body>
+</html>

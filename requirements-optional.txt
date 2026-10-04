@@ -1,0 +1,10 @@
+# 可选依赖 —— 只装这一个就能让小米侧"一次登录、长期自动续期"。
+#
+#   pip install -r requirements-optional.txt
+#
+# 装了之后：
+#   python -m notesync.mi_login          一次性交互登录（浏览器 / 账号密码 / 扫码）
+#   之后 serviceToken 过期时后端会用保存的 passToken 自动换新，不需要再登。
+#
+# 不装也完全能用：退回到在网页上手工粘贴 Cookie（缺点是过期要重贴）。
+migate

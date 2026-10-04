@@ -1,0 +1,27 @@
+{
+  "_说明": "把本文件复制成 data/config.json 再改。所有字段都能在前端改，这里只是初始值。",
+
+  "port": 8787,
+  "sync_interval_sec": 5,
+  "dry_run": false,
+  "conflict_policy": "keep_both",
+  "initial_pairing": "graph_authoritative",
+
+  "graph": {
+    "_说明": "要接真实便笺：mode 改 real，并填 Azure 应用注册的 client_id。注册时勾『个人 Microsoft 账户』+『允许公共客户端流』。",
+    "mode": "mock",
+    "client_id": "",
+    "tenant": "common",
+    "scope": "ShortNotes.ReadWrite offline_access"
+  },
+
+  "xiaomi": {
+    "_说明": "要接真实小米笔记：mode 改 real，然后在前端点『验证并保存』粘贴浏览器里的 Cookie。",
+    "mode": "mock",
+    "base_url": "https://i.mi.com",
+    "folder_name": "微软便笺",
+    "folder_id": "",
+    "write_enabled": false,
+    "warn_interval_sec": 30
+  }
+}

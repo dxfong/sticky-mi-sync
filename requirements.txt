@@ -1,0 +1,6 @@
+# 后端只用 Python 标准库，所以这个文件是空的 —— 保持「轻量」。
+#
+# 唯一可选的依赖是小米账号自动登录（免去手工复制 Cookie）：
+#   migate        首次交互式登录一次，拿到 passToken 后可长期复用
+#
+# 需要时再装：pip install -r requirements-optional.txt

@@ -1,0 +1,212 @@
+"""访问密码与登录会话。
+
+这是一台机器上的**单用户个人工具**，没有邮件服务器 ——
+所以"忘记密码 → 收邮件重置"这条路根本不存在，也不该假装存在。
+**唯一的重置方式是从宿主机 shell 跑 CLI**：
+
+    python server.py --set-password          # 交互输入（推荐）
+    docker compose exec sticky-mi-sync python server.py --set-password
+
+这条约束是**刻意的**，不是偷懒：能跑上面那条命令的人，
+本来就能读 `data/` 里的数据库、改配置、拿到小米凭据。
+所以它只是给"本来就有的权限"加个便利，**不是新开一个网络可达的后门**。
+（自托管产品的通行做法：Capstan / Portainer / Dify / n8n 全都是容器内 CLI 重置，
+ 没有一家做网络侧的密码重置端点。）
+
+实现上的几个硬要求：
+
+· **PBKDF2-HMAC-SHA256**（标准库 hashlib，不引第三方依赖）。
+  存成 `pbkdf2_sha256$迭代数$盐$哈希`，前缀可升级。
+· **会话令牌只存哈希**。cookie 里放随机 32 字节，库里只留它的 sha256 ——
+  数据库被看到也不能直接拿去登录。
+· **改密码 = 立刻吊销所有会话**（靠 `epoch` 递增）。
+  否则改完密码，旧 cookie 还能继续用 —— 那"重置"就白做了。
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import secrets
+import time
+from typing import Any
+
+#: cookie 名
+COOKIE = "sms_session"
+#: 会话有效期（秒）。30 天，够长；改密码会立刻全吊销。
+SESSION_TTL = 30 * 24 * 3600
+#: PBKDF2 迭代次数。写进哈希串里，以后可以单独升级老哈希。
+ITERATIONS = 260_000
+#: 密码最短长度。个人自用工具，不做复杂度硬要求（那只会逼出 "abc123!"）。
+MIN_LEN = 8
+
+
+# ---------------------------------------------------------------- 密码哈希
+
+def hash_password(pw: str) -> str:
+    """把明文密码变成可存储的哈希串。"""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), salt, ITERATIONS)
+    return "pbkdf2_sha256${}${}${}".format(
+        ITERATIONS,
+        base64.b64encode(salt).decode(),
+        base64.b64encode(dk).decode(),
+    )
+
+
+def verify_password(pw: str, stored: str) -> bool:
+    """校验密码。用 compare_digest 做常数时间比较，别用 ==。"""
+    try:
+        algo, iters, salt_b64, hash_b64 = (stored or "").split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        salt = base64.b64decode(salt_b64)
+        want = base64.b64decode(hash_b64)
+        got = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"),
+                                  salt, int(iters))
+        return hmac.compare_digest(got, want)
+    except Exception:
+        return False
+
+
+def check_strength(pw: str) -> str | None:
+    """返回不合格的原因；合格返回 None。"""
+    if not pw:
+        return "密码不能为空"
+    if len(pw) < MIN_LEN:
+        return f"密码至少 {MIN_LEN} 位"
+    if len(pw) > 200:
+        return "密码过长"
+    return None
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------- 鉴权
+
+class Auth:
+    """密码 + 会话。状态都存在 store 里，所以重启不丢登录态。"""
+
+    def __init__(self, store, log=None):
+        self.store = store
+        self._log = log or (lambda msg, level="info": None)
+        # 登录失败节流：内存计数即可（重启归零无所谓，重启本身要宿主机权限）
+        self._fails: dict[str, list[float]] = {}
+
+    # ---------------------------------------------------------- 密码
+
+    def has_password(self) -> bool:
+        return bool(self.store.get_cred("auth_password"))
+
+    def set_password(self, pw: str, *, revoke: bool = True) -> None:
+        """设置/重置密码。**默认吊销所有会话** —— 重置的意义就在于此。"""
+        self.store.set_cred("auth_password", hash_password(pw))
+        if revoke:
+            self.revoke_all()
+        self._log("访问密码已更新（所有已登录会话已失效）", "warn")
+
+    def verify(self, pw: str) -> bool:
+        stored = self.store.get_cred("auth_password") or ""
+        if not stored:
+            return False
+        return verify_password(pw, stored)
+
+    def clear_password(self) -> None:
+        """清掉密码 —— 下次打开页面会回到"首次设置"状态。"""
+        self.store.del_cred("auth_password")
+        self.revoke_all()
+        self._log("访问密码已清除（页面会要求重新设置）", "warn")
+
+    # ---------------------------------------------------------- 会话
+
+    def _epoch(self) -> int:
+        try:
+            return int(self.store.get_meta("auth_epoch") or "0")
+        except Exception:
+            return 0
+
+    def _sessions(self) -> dict[str, dict]:
+        """{token_hash: {"exp": 过期时间, "epoch": 签发时的 epoch}}"""
+        raw = self.store.get_cred("auth_sessions") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        now = time.time()
+        out: dict[str, dict] = {}
+        for k, v in raw.items():
+            try:
+                # 兼容老格式（直接存过期时间戳）
+                rec = v if isinstance(v, dict) else {"exp": float(v), "epoch": 0}
+                if float(rec.get("exp") or 0) > now:
+                    out[k] = rec
+            except Exception:
+                continue
+        return out
+
+    def _save_sessions(self, s: dict[str, dict]) -> None:
+        self.store.set_cred("auth_sessions", s)
+
+    def new_session(self) -> str:
+        """签发一个新会话，返回要放进 cookie 的令牌（明文只出现这一次）。
+
+        epoch **写在会话记录里**，而不是让客户端带上来 ——
+        放 cookie 里等于多一个客户端可伪造的字段，还得额外校验一致性。
+        """
+        token = secrets.token_urlsafe(32)
+        s = self._sessions()
+        s[token_hash(token)] = {"exp": time.time() + SESSION_TTL,
+                                "epoch": self._epoch()}
+        self._save_sessions(s)
+        return token
+
+    def validate(self, token: str | None) -> bool:
+        """cookie 里的令牌是否有效。
+
+        **会话记录里的 epoch 必须等于当前 epoch** ——
+        这正是"改密码/重置立刻踢掉所有旧会话"的实现方式。
+        """
+        if not token:
+            return False
+        rec = self._sessions().get(token_hash(token))
+        if not rec:
+            return False
+        return int(rec.get("epoch") or 0) == self._epoch()
+
+    def logout(self, token: str | None) -> None:
+        if not token:
+            return
+        s = self._sessions()
+        s.pop(token_hash(token), None)
+        self._save_sessions(s)
+
+    def revoke_all(self) -> None:
+        """吊销全部会话：清空列表 + epoch+1（双保险，防止旧表被写回）。"""
+        self.store.set_cred("auth_sessions", {})
+        self.store.set_meta("auth_epoch", str(self._epoch() + 1))
+        self._fails.clear()
+
+    # ---------------------------------------------------------- 失败节流
+
+    def throttled(self, ip: str) -> int:
+        """返回还要等几秒；0 表示可以尝试。"""
+        now = time.time()
+        hits = [t for t in self._fails.get(ip, []) if now - t < 300]
+        self._fails[ip] = hits
+        if len(hits) < 5:
+            return 0
+        wait = int(300 - (now - hits[0]))
+        return max(wait, 1)
+
+    def note_fail(self, ip: str) -> None:
+        self._fails.setdefault(ip, []).append(time.time())
+
+    def note_ok(self, ip: str) -> None:
+        self._fails.pop(ip, None)

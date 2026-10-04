@@ -1,0 +1,50 @@
+# sticky-mi-sync 一键部署
+#
+#   docker compose up -d          启动（首次会构建镜像）
+#   打开 http://<这台机器的IP>:8787
+#
+# 数据在哪：命名卷 sms-data 挂在 /app/data。
+#   凭据、映射、日志、备份全在里面 —— 容器删掉重建也不会丢。
+#   想删干净重新登录：docker compose down -v
+
+services:
+  sticky-mi-sync:
+    build: .
+    image: sticky-mi-sync:latest
+    container_name: sticky-mi-sync
+    restart: unless-stopped
+    ports:
+      # 左边是宿主机端口，想换端口只改这里（如 18000:8787）
+      - "8787:8787"
+    environment:
+      # 容器里必须监听 0.0.0.0，否则宿主机连不进来
+      SMS_HOST: "0.0.0.0"
+      TZ: "Asia/Shanghai"
+      # ★ 可选：用环境变量注入访问密码（免去首次打开页面手动设置）。
+      #
+      #   只在**第一次启动**需要 —— 设完密码就会以哈希形式存进 data/，
+      #   之后把它删掉即可。**建议用完就删**，理由是：
+      #     · 环境变量对 `docker inspect` 和 /proc/1/environ 都是**明文可见**的
+      #     · 写在 compose 文件里 = 明文进版本库
+      #   删掉之后不影响使用，也不影响以后用 CLI 重置密码。
+      #
+      #   密码规则：至少 8 位。**不合格会被忽略**（退回页面上首次设置），
+      #   不会因为变量写错就把服务变成无防护状态。
+      #
+      #   也可以改用 env_file（文件权限 600），或 Docker secrets。
+      # SMS_PASSWORD: "换成你自己的强密码"
+    volumes:
+      # ★ 整个数据目录挂出来 —— 这是"持久化"的全部内容
+      - sms-data:/app/data
+    healthcheck:
+      # 探 /api/auth/status（白名单端点，未登录也是 200）。
+      # 不要探 /api/state —— 它要登录，401 会让 urlopen 抛异常 → 永远 unhealthy。
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8787/api/auth/status',timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  sms-data:
