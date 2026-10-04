@@ -219,9 +219,33 @@ Windows 上也可以直接双击 `start-server.bat`。
 按提示的四条排查：令牌过期（重新导一次）、账号不对、复制不完整（usertoken 很长）、
 或者**源机器上的便笺网页版本身也已经掉登录了**（回那台机器刷新一下网页版再导）。
 
+**导入成功了，但过一段时间又变成未登录**
+NotesFabric 的 usertoken 是**会过期**的，而容器里没有浏览器 profile，
+**没法像你本机那样自动刷新** —— 所以过期后要重新导出一次再粘。
+本机会自动刷新（它有 profile），所以你在本机永远感觉不到这个问题。
+临时救急：在本机跑一次 `python -m notesync.export_creds`，把新凭据粘过去即可。
+
+> 为什么不能把 profile 一起搬过去：它是宿主浏览器的目录（本机实测 184MB / 2372 个文件），
+> 而且和操作系统的浏览器版本绑定，跨到 Linux 容器里用不了。
+
 **小米扫码一直停在「获取二维码…」**
 说明这台机器连不上 `i.mi.com`（20 秒会超时并给出提示）。改用「粘贴 Cookie」登录，
 或检查容器网络。
+
+**容器能上国内网、上不了国外网（`substrate.office.com` 超时）**
+在**某些受限网络**里，Docker 的 bridge 网络走不通国外（实测：容器内 `i.mi.com` 通、
+但所有 `*.microsoft.com` / github / cloudflare 全部 TCP 超时，而宿主机直连是通的）。
+这时给容器换成宿主网络即可 —— 建一个 `docker-compose.override.yml`（**不必改仓库文件**）：
+
+```yaml
+services:
+  sticky-mi-sync:
+    network_mode: host
+    ports: !reset []
+```
+
+> `ports: !reset []` 是 Compose 2.24+ 的语法，用来清掉继承来的端口映射
+> （host 模式下端口已由宿主机提供，再映射会冲突）。
 
 **构建时卡在 `Connection to pypi.org timed out`**
 国内直连 PyPI 会超时。换成本地镜像源即可 —— 不用改文件，命令行传一下：
