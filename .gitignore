@@ -62,3 +62,9 @@ RELEASE-CHECKLIST.md
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# ═══════════════════════════════════════════════════════════
+#  浏览器走查的截图（browser_walk.py 生成，属本地测试产物）
+# ═══════════════════════════════════════════════════════════
+devtools/_shots/
+_browser_shots/
