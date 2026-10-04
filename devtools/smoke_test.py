@@ -167,16 +167,42 @@ def main() -> int:
 
         # ---- 5. ★ fabric 的粘贴入口必须能用（至少要"接受 payload"）
         print("\n[5] fabric 粘贴入口（旧版会返回「通道不支持」）")
-        r, dt = ctx.call("/api/graph/token", {"payload": "MSAuth1.0 usertoken=\"bogus-token-for-smoke-test\""})
+        # 用一个**格式完整但内容无效**的凭据 —— 这样才会走到网络验证那一步，
+        # 才能真正验证"入口是通的"。格式不全的会被下面的校验拦下（那是另一组用例）。
+        full = ('Authorization: MSAuth1.0 usertoken="EwBIBOl3BAAUcnotHNLXVkMD2e8VE2fOV'
+                'px751UAAQb8lk7bQlto5801", type="MSACT"\n'
+                'x-anchormailbox: MSA:smoke-test@outlook.com')
+        r, dt = ctx.call("/api/graph/token", {"payload": full})
         err = str(r.get("error", ""))
         ok("粘贴端点在 fabric 下被受理（不是「通道不支持」）",
            "不支持" not in err and "先切到 real" not in err,
-           f"{dt:.1f}s -> {err[:180]}")
-        ok("粘错内容会给出可照做的提示（列出常见原因）",
-           ("常见原因" in err) or ("重新导出" in err) or r.get("ok") is True,
-           err[:180])
-        ok("验证失败时不把坏凭据留在库里（应回滚）",
-           r.get("ok") is not True, "假令牌不该被当成登录成功")
+           f"{dt:.1f}s -> {err[:160]}")
+        ok("格式完整但无效的凭据会走到网络验证（并最终失败）",
+           r.get("ok") is not True and bool(err), err[:160])
+
+        print("\n[5b] ★ 格式校验：应在**发出请求之前**拦下并给出复制指引")
+        # 只粘 Authorization 一行 —— 最常踩的坑（缺 anchormailbox）
+        r, dt = ctx.call("/api/graph/token", {"payload":
+            'Authorization: MSAuth1.0 usertoken="EwBIBOl3", type="MSACT"'})
+        e1 = str(r.get("error", ""))
+        ok("只粘一行会提示缺 x-anchormailbox",
+           "anchormailbox" in e1, f"{dt:.1f}s -> {e1[:150]}")
+
+        # 少抄结尾的 , type="MSACT"
+        r, dt = ctx.call("/api/graph/token", {"payload":
+            'Authorization: MSAuth1.0 usertoken="EwBIBOl3"\n'
+            'x-anchormailbox: MSA:a@b.com'})
+        e2 = str(r.get("error", ""))
+        ok("少抄结尾 type= 会被指出",
+           'type=' in e2 or "不完整" in e2, f"{dt:.1f}s -> {e2[:150]}")
+
+        # 拿了 Graph 的 JWT
+        r, dt = ctx.call("/api/graph/token", {"payload":
+            'Authorization: eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.aaa.bbb\n'
+            'x-anchormailbox: MSA:a@b.com'})
+        e3 = str(r.get("error", ""))
+        ok("拿 Graph 令牌会被明确劝退",
+           "Graph" in e3 or "NotesFabric" in e3, f"{dt:.1f}s -> {e3[:150]}")
 
         # ---- 6. 小米扫码不能挂住
         print("\n[6] 小米扫码（缺 migate 或网络受限时必须快速返回）")
