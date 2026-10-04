@@ -141,9 +141,17 @@ def main() -> int:
         # ---- 2. ★ 默认通道
         print("\n[2] 默认通道（最关键）")
         cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
-        gm = cfg.get("graph", {}).get("mode")
-        ok("graph.mode 默认是 fabric", gm == "fabric",
-           f"实际是 {gm!r} —— 若是 mock/real，全新部署会拿到缺 2026 便笺的残缺数据")
+        gcfg = cfg.get("graph", {})
+        gm = gcfg.get("mode")
+        ok("graph.mode 默认是 real", gm == "real",
+           f"实际是 {gm!r} —— 若是 mock/fabric，全新部署会拿不到"
+           f"「数据全 + 自动续期」这个组合")
+        sc = str(gcfg.get("scope") or "")
+        ok("scope 指向 Outlook REST（不是 Graph 的 ShortNotes）",
+           "outlook.office.com" in sc,
+           f"实际 {sc!r} —— ShortNotes 对个人账号的端点根本不存在")
+        ok("tenant 默认 consumers（个人账号必须）",
+           gcfg.get("tenant") == "consumers", f"实际 {gcfg.get('tenant')!r}")
 
         # ---- 3. 设密码 + 登录
         print("\n[3] 首次设置密码 + 登录")
@@ -155,54 +163,48 @@ def main() -> int:
         ok("登录成功", r.get("ok") is True, str(r)[:120])
         state, _ = ctx.call("/api/state")
         g = state.get("graph", {})
-        ok("运行态通道也是 fabric", g.get("mode") == "fabric", f"实际 {g.get('mode')!r}")
+        ok("运行态通道也是 real", g.get("mode") == "real", f"实际 {g.get('mode')!r}")
 
         # ---- 4. 登录端点：未配置时应给「能看懂的提示」
         print("\n[4] 登录端点返回值是否可读（不能 500 / 不能挂死）")
         r, dt = ctx.call("/api/graph/login/start", {})
-        ok("设备码端点在 fabric 下给出明确指引",
-           r.get("status") == "error" and "NotesFabric" in str(r.get("error", "")),
+        ok("设备码端点在未填 client_id 时给出可读提示",
+           r.get("status") == "error" and "client_id" in str(r.get("error", "")),
            f"{dt:.1f}s -> {str(r)[:150]}")
         ok("设备码端点没有挂死", dt < 20, f"耗时 {dt:.1f}s")
 
-        # ---- 5. ★ fabric 的粘贴入口必须能用（至少要"接受 payload"）
-        print("\n[5] fabric 粘贴入口（旧版会返回「通道不支持」）")
-        # 用一个**格式完整但内容无效**的凭据 —— 这样才会走到网络验证那一步，
-        # 才能真正验证"入口是通的"。格式不全的会被下面的校验拦下（那是另一组用例）。
-        full = ('Authorization: MSAuth1.0 usertoken="EwBIBOl3BAAUcnotHNLXVkMD2e8VE2fOV'
-                'px751UAAQb8lk7bQlto5801", type="MSACT"\n'
-                'x-anchormailbox: MSA:smoke-test@outlook.com')
-        r, dt = ctx.call("/api/graph/token", {"payload": full})
-        err = str(r.get("error", ""))
-        ok("粘贴端点在 fabric 下被受理（不是「通道不支持」）",
-           "不支持" not in err and "先切到 real" not in err,
-           f"{dt:.1f}s -> {err[:160]}")
-        ok("格式完整但无效的凭据会走到网络验证（并最终失败）",
-           r.get("ok") is not True and bool(err), err[:160])
-
-        print("\n[5b] ★ 格式校验：应在**发出请求之前**拦下并给出复制指引")
-        # 只粘 Authorization 一行 —— 最常踩的坑（缺 anchormailbox）
+        # ---- 5. 粘贴入口
+        # real 模式下这个端点收的是 **Graph 的 access_token**（JWT），
+        # 不是 NotesFabric 的 MSAuth1.0 那种。传错类型应该被格式预检拦下
+        # 并说清原因 —— 这正是要验证的（而不是等到网络 401 才发现拿错了）。
+        print("\n[5] 粘贴入口（real 模式收 Graph access_token）")
         r, dt = ctx.call("/api/graph/token", {"payload":
-            'Authorization: MSAuth1.0 usertoken="EwBIBOl3", type="MSACT"'})
+            'MSAuth1.0 usertoken="x", type="MSACT"\nx-anchormailbox: MSA:a@b.com'})
+        err5 = str(r.get("error", ""))
+        ok("拿错类型的令牌会被拦下并说明原因",
+           r.get("ok") is not True and bool(err5), f"{dt:.1f}s -> {err5[:170]}")
+
+        print("\n[5b] ★ 格式校验：应在**发出请求之前**拦下并说明原因")
+        # 空
+        r, dt = ctx.call("/api/graph/token", {"payload": ""})
+        e0 = str(r.get("error", ""))
+        ok("空令牌被拦下", r.get("ok") is not True and bool(e0),
+           f"{dt:.1f}s -> {e0[:140]}")
+
+        # 明显不是令牌的字符串
+        r, dt = ctx.call("/api/graph/token", {"payload": "hello-world"})
         e1 = str(r.get("error", ""))
-        ok("只粘一行会提示缺 x-anchormailbox",
-           "anchormailbox" in e1, f"{dt:.1f}s -> {e1[:150]}")
+        ok("不像令牌的内容被拦下并说明",
+           r.get("ok") is not True and ("不像" in e1 or "access token" in e1.lower()),
+           f"{dt:.1f}s -> {e1[:140]}")
 
-        # 少抄结尾的 , type="MSACT"
+        # 拿 NotesFabric 的 MSAuth1.0 冒充 Graph 令牌
         r, dt = ctx.call("/api/graph/token", {"payload":
-            'Authorization: MSAuth1.0 usertoken="EwBIBOl3"\n'
+            'Authorization: MSAuth1.0 usertoken="EwBIBOl3", type="MSACT"\n'
             'x-anchormailbox: MSA:a@b.com'})
         e2 = str(r.get("error", ""))
-        ok("少抄结尾 type= 会被指出",
-           'type=' in e2 or "不完整" in e2, f"{dt:.1f}s -> {e2[:150]}")
-
-        # 拿了 Graph 的 JWT
-        r, dt = ctx.call("/api/graph/token", {"payload":
-            'Authorization: eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.aaa.bbb\n'
-            'x-anchormailbox: MSA:a@b.com'})
-        e3 = str(r.get("error", ""))
-        ok("拿 Graph 令牌会被明确劝退",
-           "Graph" in e3 or "NotesFabric" in e3, f"{dt:.1f}s -> {e3[:150]}")
+        ok("拿 MSAuth1.0 冒充 Graph 令牌会被拦下",
+           r.get("ok") is not True and bool(e2), f"{dt:.1f}s -> {e2[:140]}")
 
         # ---- 6. 小米扫码不能挂住
         print("\n[6] 小米扫码（缺 migate 或网络受限时必须快速返回）")

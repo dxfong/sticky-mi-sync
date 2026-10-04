@@ -984,7 +984,7 @@ function renderLoginBoxes(g, x, cfg){
           <input id="gCid" placeholder="client_id（Azure 应用注册的 Application (client) ID）"
                  style="flex:1;min-width:170px" value="${esc((cfg && cfg.graph && cfg.graph.client_id) || "")}">
           <input id="gTenant" placeholder="tenant" style="width:110px"
-                 value="${esc((cfg && cfg.graph && cfg.graph.tenant) || "common")}">
+                 value="${esc((cfg && cfg.graph && cfg.graph.tenant) || "consumers")}">
           <button id="gCidSave">保存</button>
           <button class="primary" id="gIn"${g.configured ? "" : " disabled"}>开始设备码登录</button>
         </div>
@@ -998,8 +998,8 @@ function renderLoginBoxes(g, x, cfg){
           <div class="kv" style="margin-top:8px;line-height:1.85">
             点上面的按钮 → 页面给出一个码 → 在微软官方页面输码授权一次 →
             之后 token 自动续期，不用再管。<br>
-            tenant 默认 <code>common</code>；若报 <code>AADSTS50059</code> 或提示账户类型不支持，
-            改成 <code>consumers</code> 保存后重试（纯个人账号专用端点）。
+            tenant 默认 <code>consumers</code>（<b>个人微软账号必须用它</b>；
+            用 <code>common</code> 会报 <code>AADSTS50059</code>）。组织账号才改成 <code>common</code>。
           </div>
           <ol class="kv" style="margin:10px 0 0 18px;padding:0;line-height:1.95">
             <li>打开 <a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
@@ -1012,9 +1012,11 @@ function renderLoginBoxes(g, x, cfg){
               入口 —— <b>不用找它，直接跳过</b>，只要「允许公共客户端流」是开着的就行。想找旧界面，页面顶部有一条
               "switch to the old experience" 的链接。</span></li>
             <li>进 <b>API 权限</b> → 添加权限 → <b>Microsoft Graph</b> → <b>委托的权限</b> →
-              搜 <code>ShortNotes</code> → 勾 <code>ShortNotes.ReadWrite</code> → <b>添加</b>
-              <br>（这一步顺便验证了权限到底存不存在。搜不到就改勾 <code>Mail.Read</code>，
-              程序会自动走邮箱便笺通道，那条只能读）</li>
+              搜 <code>Notes</code> → 勾 <code>Notes.ReadWrite</code> → <b>添加</b>
+              <br><span style="color:var(--accent)">✅ 就是这一项，别勾成 ShortNotes</span> ——
+              便笺真正的接口是 <b>Outlook REST</b>（<code>outlook.office.com/api/beta/me/notes</code>），
+              它认的是 <code>Notes.ReadWrite</code>。而 ShortNotes 那个端点
+              <b>对个人微软账号根本不存在</b>（实测返回 400），勾了也读不到东西。</li>
             <li>回 <b>概述</b> 页复制 <b>应用程序(客户端) ID</b> → 粘到左边输入框 → 点<b>保存</b> →
               按钮就会亮起来</li>
           </ol>
@@ -1022,17 +1024,18 @@ function renderLoginBoxes(g, x, cfg){
         <div class="sep"></div>
         <details>
           <summary class="kv" style="cursor:pointer">
-            方式 A · 临时验证用（粘 Access token，约 1 小时过期，不能自动续期）
+            方式 A · 临时验证用（粘 Graph 令牌）—
+            <span style="color:var(--warn)">⚠ 只能读到 2025 及以前，缺 2026 的便笺</span>
           </summary>
           <div class="kv" style="margin:6px 0">
             打开 <a href="https://developer.microsoft.com/graph/graph-explorer" target="_blank"
             style="color:var(--accent2)">Graph Explorer</a> 登录 →
-            地址栏改成 <code>https://graph.microsoft.com/v1.0/me/notes</code> →
+            地址栏改成 <code>https://graph.microsoft.com/v1.0/me/mailfolders/notes/messages</code> →
             右侧点 <b>Open the permissions panel</b>（左边那个搜索框是搜示例查询的，不是搜权限）→
-            在权限面板里搜 <code>ShortNotes</code> → 勾 <code>ShortNotes.ReadWrite</code> → Consent →
-            回 <b>Access token</b> 标签复制，整段贴进来。
-            <br><span style="color:var(--warn)">权限面板里如果搜不到 ShortNotes（列表加载不出来或没收录），
-            改勾 <code>Mail.Read</code> 也能读到便笺 —— 程序会自动切到邮箱便笺通道，但那条通道只能读、不能写。</span>
+            搜 <code>Mail.Read</code> → 勾上 → Consent → 回 <b>Access token</b> 标签复制，整段贴进来。
+            <br><span style="color:var(--warn)">这条路走的是 Graph 的「邮箱便笺文件夹」，
+            <b>2026 年的便笺读不到</b>（那条数据只有 Outlook REST 有）。只适合临时看看历史便笺，
+            长期用请走上面的<strong>设备码登录</strong>。</span>
           </div>
           <textarea id="gTok" placeholder="粘贴 Access token（eyJ0eXAi...）"></textarea>
           <div class="row" style="margin-top:7px">

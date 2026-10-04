@@ -30,14 +30,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     #   adopt_both           两边都收（两边本来就是干净的才用，否则会重复一遍）
     "initial_pairing": "graph_authoritative",
     "graph": {
-        # ★ 默认就是 fabric —— 这是**唯一数据完整**的通道。
-        #   别再改回 mock/real：mock 会在 build_graph 里静默落到 RealGraph，
-        #   而 real（Graph API）读不到 2026 年的便笺（那条通道没有新格式数据）。
-        #   全新部署必须开箱即用，所以默认值只能是真正能用的那个。
-        "mode": "fabric",            # fabric（推荐）| real
-        "client_id": "",             # Azure 应用注册的 Application (client) ID（仅 real 模式用）
-        "tenant": "common",          # 个人账号用 common 或 consumers
-        "scope": "ShortNotes.ReadWrite offline_access",
+        # ★ 默认走 **real（OAuth）+ Outlook REST** —— 这是唯一同时满足
+        #   「数据完整（含 2026 便笺）」和「refresh_token 自动续期」的通道。
+        #   fabric 数据也全，但它的令牌拿不到 refresh_token，一过期就得
+        #   人工从浏览器重抓 —— 在容器里根本没法长期跑。
+        "mode": "real",              # real（推荐，走 Outlook REST）| fabric
+        "client_id": "",             # Azure 应用注册的 Application (client) ID
+        "tenant": "consumers",       # 个人微软账号必须 consumers；组织账号用 common
+        # ★ 这个 scope 指向 Outlook REST —— 便笺真正的接口。
+        #   别改成 Graph 的 ShortNotes：个人账号上那个端点根本不存在（400）。
+        "scope": "https://outlook.office.com/notes.readwrite offline_access",
     },
     "xiaomi": {
         "mode": "real",              # mock 已停用；real 是唯一在线模式

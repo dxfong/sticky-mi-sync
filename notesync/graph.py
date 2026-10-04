@@ -28,6 +28,21 @@ LOGIN = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/{path}"
 UA = "sticky-mi-sync/0.1"
 TIMEOUT = 30
 
+# ★ Outlook REST（beta）—— **唯一能同时拿到「数据完整」和「自动续期」的通道**。
+#
+# 为什么是 beta 而不是 v2.0（和直觉相反，实测出来的）：
+#   · /api/v2.0/me/notes  → 400 `Resource not found for the segment 'notes'`
+#   · /api/beta/me/notes  → 200，且条数与年份分布和 NotesFabric **逐项一致**
+#                            （170 条；2020:17 2021:33 2022:56 2023:18
+#                              2024:16 2025:14 **2026:16**）
+#
+# 这是本项目里最关键的取舍：Graph 的两条通道
+#   · /me/notes（ShortNotes）—— 个人微软账号根本没有这个端点（400）
+#   · mail 通道               —— 只有 2020–2025，**读不到 2026**
+# 而本通道走的是 OAuth + refresh_token，**不需要浏览器 profile**，
+# 所以在容器/服务器里能长期自动运行 —— 这正是之前用 NotesFabric 时做不到的。
+OUTLOOK = "https://outlook.office.com/api/beta"
+
 
 class OAuthError(Exception):
     """OAuth 端点返回的错误。保留结构化字段，便于上层按 code 分支处理
@@ -184,9 +199,21 @@ class RealGraph:
 
     # ---------------------------------------------------------- 通道探测
     def _detect_channel(self, token: str) -> str:
-        """探测哪条通道可用，结果缓存起来（每轮都探会很浪费）"""
+        """探测哪条通道可用，结果缓存起来（每轮都探会很浪费）。
+
+        ★ 顺序有讲究：**Outlook REST 优先**。
+        它数据最全（含 2026 便笺），而另外两条都缺 ——
+        所以只要它可用，就绝不该退到后面去。
+        """
         if self.channel:
             return self.channel
+
+        # ① Outlook REST（beta）—— 数据最全，且 OAuth token 能长期续期
+        code0, _ = _request("GET", f"{OUTLOOK}/me/notes?$top=1&$select=Id", token)
+        if code0 == 200:
+            self.channel = "outlook"
+            return self.channel
+
         code, data = _request("GET", f"{GRAPH}/me/notes?$top=1&$select=id", token)
         if code == 200:
             self.channel = "notes"
@@ -197,13 +224,14 @@ class RealGraph:
         if code2 == 200:
             self.channel = "mail"
             self.store.log(
-                "ShortNotes 权限不可用，已自动改用 mail 通道"
-                "（/me/mailfolders/notes/messages）—— 只读可用，写入需要 ShortNotes.ReadWrite",
-                "warn")
+                "ShortNotes 与 Outlook REST 都不可用，已退到 mail 通道"
+                "（/me/mailfolders/notes/messages）—— 只读可用，"
+                "而且**读不到 2026 年的便笺**", "warn")
             return self.channel
         msg = _err_text(code, data) if code != 403 else _err_text(code2, data2)
         raise RuntimeError(
-            f"两条便笺通道都不可用。\n/me/notes 返回 {code}；"
+            f"三条便笺通道都不可用。\n"
+            f"Outlook REST 返回 {code0}；/me/notes 返回 {code}；"
             f"/me/mailfolders/notes/messages 返回 {code2}。\n{msg}")
 
     def _require_notes_channel(self) -> None:
@@ -410,8 +438,9 @@ class RealGraph:
             "expires_in_min": left,
             "channel": self.channel,
             "channel_label": {
+                "outlook": "Outlook REST（全部便笺 · 含 2026 · 可读写）",
                 "notes": "官方便笺通道（ShortNotes 权限，可读可写）",
-                "mail": "邮箱便笺通道（Mail.Read，只读）",
+                "mail": "邮箱便笺通道（Mail.Read，只读，**缺 2026**）",
                 "": "未探测",
             }.get(self.channel, self.channel),
             "error": self.last_error,
@@ -420,6 +449,8 @@ class RealGraph:
     def list_notes(self, max_pages: int | None = None) -> list[dict[str, Any]]:
         token = self.ensure_token()
         channel = self._detect_channel(token)
+        if channel == "outlook":
+            return self._list_via_outlook(token)
         if channel == "mail":
             return self._list_via_mail(token)
         return self._list_via_notes(token)
@@ -583,6 +614,63 @@ class RealGraph:
             f"?$select=id,subject,body,changeKey,lastModifiedDateTime&$top=100",
             pick)
 
+    # ------------------------------------------------------ Outlook REST 通道
+    #
+    # ★ 这是**首选**通道：数据最全（含 2026），且走 OAuth + refresh_token，
+    #   不需要浏览器 profile —— **容器里能长期自动运行**。
+    #
+    # 字段名用 **PascalCase**（`Id` / `Body` / `LastModifiedDateTime`），
+    # 与 Graph 的小驼峰不同。以实测为准，别照抄 Graph 的写法。
+    def _list_via_outlook(self, token: str) -> list[dict[str, Any]]:
+        def pick(item: dict) -> dict:
+            body = item.get("Body") or {}
+            content = body.get("Content") or ""
+            ctype = (body.get("ContentType") or "").lower()
+            # 正文可能是 HTML —— 必须转纯文本，否则和小米侧比对时
+            # 会因为标签差异反复判定"有改动"（这个坑在 mail 通道上踩过）。
+            text = html_to_text(content) if (ctype == "html" or "<" in content) else content
+            return {
+                "id": item.get("Id", ""),
+                "text": text,
+                "change_key": item.get("ChangeKey", ""),
+                "modified": 0,
+                "modified_iso": item.get("LastModifiedDateTime", ""),
+                "deleted": bool(item.get("IsDeleted")),
+            }
+        return self._paged(
+            token,
+            f"{OUTLOOK}/me/notes"
+            f"?$select=Id,Subject,Body,ChangeKey,LastModifiedDateTime,IsDeleted"
+            f"&$top=100",
+            pick)
+
+    def _create_via_outlook(self, text: str) -> dict[str, Any]:
+        code, data = _request("POST", f"{OUTLOOK}/me/notes", self.ensure_token(), {
+            "Body": {"ContentType": "Text", "Content": text or ""},
+        })
+        if code not in (200, 201):
+            raise RuntimeError(f"新建便笺失败 {code}：{_err_text(code, data)}")
+        return {"id": data.get("Id", ""), "change_key": data.get("ChangeKey", "")}
+
+    def _update_via_outlook(self, note_id: str, text: str,
+                            change_key: str = "") -> dict[str, Any]:
+        headers = {"If-Match": change_key} if change_key else None
+        code, data = _request("PATCH", f"{OUTLOOK}/me/notes/{note_id}",
+                              self.ensure_token(),
+                              {"Body": {"ContentType": "Text", "Content": text or ""}},
+                              headers)
+        if code == 412:
+            raise Conflict("这条便笺在别处被改过了（412），本轮放弃写入")
+        if code not in (200, 201):
+            raise RuntimeError(f"更新便笺失败 {code}：{_err_text(code, data)}")
+        return {"id": note_id, "change_key": data.get("ChangeKey", "")}
+
+    def _delete_via_outlook(self, note_id: str) -> None:
+        code, data = _request("DELETE", f"{OUTLOOK}/me/notes/{note_id}",
+                              self.ensure_token())
+        if code not in (200, 204):
+            raise RuntimeError(f"删除便笺失败 {code}：{_err_text(code, data)}")
+
     # ------------------------------------------------------ 写操作：按通道分发
     #
     # 为什么必须分发：`/me/notes`（ShortNotes）这个终点**对个人微软账号根本不存在**
@@ -590,18 +678,27 @@ class RealGraph:
     # 官方文档写着支持个人账户，实际没开通。所以 MSA 只能走 Notes 邮件文件夹那条路，
     # 读已经是这样了，写也必须跟上，否则整个同步只能单向。
     def create_note(self, text: str, when_iso: str = "") -> dict[str, Any]:
-        if self._detect_channel(self.ensure_token()) == "mail":
+        ch = self._detect_channel(self.ensure_token())
+        if ch == "outlook":
+            return self._create_via_outlook(text)
+        if ch == "mail":
             return self._create_via_mail(text)
         return self._create_via_notes(text)
 
     def update_note(self, note_id: str, text: str,
                     change_key: str = "", when_iso: str = "") -> dict[str, Any]:
-        if self._detect_channel(self.ensure_token()) == "mail":
+        ch = self._detect_channel(self.ensure_token())
+        if ch == "outlook":
+            return self._update_via_outlook(note_id, text, change_key)
+        if ch == "mail":
             return self._update_via_mail(note_id, text)
         return self._update_via_notes(note_id, text, change_key)
 
     def delete_note(self, note_id: str) -> None:
-        if self._detect_channel(self.ensure_token()) == "mail":
+        ch = self._detect_channel(self.ensure_token())
+        if ch == "outlook":
+            return self._delete_via_outlook(note_id)
+        if ch == "mail":
             return self._delete_via_mail(note_id)
         return self._delete_via_notes(note_id)
 
