@@ -88,15 +88,20 @@ def rebuild():
 
     if gmode == "fabric":
         graph = NotesFabricGraph(store)
-    else:
-        # 兜底走 Graph。**历史配置里如果还留着 mock / local，这里会静默落到
-        # real** —— 那会变成"界面写着 mock、实际在连真服务"，比直接报错更危险。
-        # 所以顺手把配置修正掉，并记一条日志。
+    elif gmode == "real":
+        # 用户显式选的 real —— 尊重。但要清楚它**读不到 2026 年的便笺**，
+        # 只是有人可能因为设备码登录方便而选它。
         graph = RealGraph(store)
-        if gmode not in ("real", "fabric"):
-            store.cfg["graph"]["mode"] = "real"
-            store.save_config()
-            store.log(f"微软模式 {gmode!r} 已停用，自动切到 real", "warn")
+    else:
+        # mock / local 这类已停用的值（含老版本配置、旧镜像的 data/）：
+        # ★ 一律落到 **fabric**，不是 real。
+        #   旧版这里落到 real，结果**全新部署拿到的是「缺 2026 便笺」的残缺数据**，
+        #   而且界面只显示「Graph · 缺 2026 便笺」一行小字，很难联想到是默认值的问题
+        #   —— 发布后实测踩到的就是这个。fabric 才是数据最全的那个通道。
+        graph = NotesFabricGraph(store)
+        store.cfg["graph"]["mode"] = "fabric"
+        store.save_config()
+        store.log(f"微软模式 {gmode!r} 已停用，自动切到 fabric（数据最全）", "warn")
 
     # 小米侧同理：mock 已停用
     # xiaomi = MockXiaomi(store) if xmode == "mock" else RealXiaomi(store)
@@ -1126,9 +1131,17 @@ class Handler(BaseHTTPRequestHandler):
 
             # ---------------- 微软登录
             if path == "/api/graph/login/start":
+                if isinstance(graph, NotesFabricGraph):
+                    # fabric 的 usertoken 不是 OAuth 换来的，设备码对它无效。
+                    # 旧文案写的是"当前是 mock 模式"，会把人误导到错误方向。
+                    return self._json({
+                        "status": "error",
+                        "error": "当前是 NotesFabric 通道（数据最全），它不用设备码登录 —— "
+                                 "设备码换出来的是 Graph 令牌，读不到 2026 年的便笺。"
+                                 "请改用下面的「粘贴凭据」。"})
                 if not isinstance(graph, RealGraph):
                     return self._json({"status": "error",
-                                       "error": "当前是 mock 模式，不需要登录"})
+                                       "error": f"当前通道是 {type(graph).__name__}，不支持设备码登录"})
                 try:
                     return self._json(graph.start_device_login())
                 except Exception as e:
@@ -1138,7 +1151,8 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/graph/login/poll":
                 if not isinstance(graph, RealGraph):
-                    return self._json({"status": "error", "error": "mock 模式"})
+                    return self._json({"status": "error",
+                                       "error": "当前通道不支持设备码登录"})
                 r = graph.poll_device_login()
                 # 授权成功就**立刻做分层体检**，把"能不能用、卡在哪一层"当场给出结论，
                 # 而不是等用户点了同步再对着一个 401 猜。
@@ -1186,15 +1200,28 @@ class Handler(BaseHTTPRequestHandler):
 
             # 快捷通道：直接粘贴访问令牌，不需要 Azure 应用注册
             if path == "/api/graph/token":
-                if not isinstance(graph, RealGraph):
-                    return self._json({"ok": False,
-                                       "error": "当前是 mock 模式，先切到 real"}, 400)
+                # 两条通道各有自己的粘贴格式，必须分开处理：
+                #   fabric → MSAuth1.0 usertoken（从 DevTools 复制，或用本机导出工具）
+                #   real   → Graph 的 OAuth access_token（Graph Explorer 拿，约 1 小时）
+                # ★ 旧版这里写死 `if not isinstance(graph, RealGraph): 报"先切到 real"`，
+                #   把 fabric 挡在门外 —— 而 fabric 的 token **只能靠粘贴**（OAuth 拿不到），
+                #   等于在新环境里彻底没法登录。这是发布后才发现的致命缺口。
+                payload = (body.get("payload") or body.get("access_token") or "")
                 try:
-                    r = graph.use_pasted_token(body.get("access_token") or "")
+                    if isinstance(graph, NotesFabricGraph):
+                        r = graph.use_pasted_token(payload)
+                    elif isinstance(graph, RealGraph):
+                        r = graph.use_pasted_token(payload)
+                    else:
+                        return self._json({
+                            "ok": False,
+                            "error": f"当前通道是 {type(graph).__name__}，不支持粘贴登录"},
+                            400)
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
-                store.log("微软侧已用粘贴令牌登录，剩余约 "
-                          f"{r.get('expires_in_min')} 分钟")
+                if r.get("expires_in_min"):
+                    store.log("微软侧已用粘贴令牌登录，剩余约 "
+                              f"{r['expires_in_min']} 分钟")
                 return self._json(r)
 
             # ---------------- 小米扫码登录（在页面里完成，不需要开终端）

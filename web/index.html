@@ -945,6 +945,36 @@ function renderLoginBoxes(g, x, cfg){
             ${err}
           </div>
           <button id="gOut">退出登录</button></div>`);
+    } else if (g.mode === "fabric") {
+      // ★ fabric 通道（默认，也是数据最全的那个）：**只能粘贴凭据**。
+      //   NotesFabric 的 usertoken 由便笺网页版在页面里生成，OAuth / 设备码都拿不到它。
+      //   所以在容器 / 服务器这种没有浏览器 profile 的环境里，粘贴是唯一的路。
+      //   （发布后实测才发现：旧版这里没有分支，fabric 下渲染的是设备码界面，
+      //     点下去后端回一句"当前是 mock 模式"，用户完全懵。）
+      parts.push(`
+        <div class="kv" style="line-height:1.85">
+          把<b>本机已登录的凭据</b>粘过来即可。容器 / 服务器里<b>只能这样登录</b> ——
+          NotesFabric 的令牌由便笺网页版生成，OAuth 拿不到它。
+        </div>
+        <textarea id="gFab" style="margin-top:8px;min-height:88px"
+          placeholder="粘贴以下任意一种：&#10;① 用导出工具打印的整段文本（推荐）&#10;② 完整 JSON：{&quot;authorization&quot;:&quot;MSAuth1.0 usertoken=...&quot;,&quot;anchormailbox&quot;:&quot;MSA:you@outlook.com&quot;}&#10;③ 从 DevTools 复制的两行请求头（Authorization: / x-anchormailbox:）"></textarea>
+        <div class="row" style="margin-top:7px">
+          <button class="primary" id="gFabSave">导入并验证</button>
+          <span class="kv" id="gFabMsg"></span>
+        </div>
+        <details style="margin-top:8px">
+          <summary class="kv" style="cursor:pointer">怎么拿到这段凭据？（点开）</summary>
+          <div class="kv" style="margin-top:8px;line-height:1.95">
+            <b>最省事：在已经登录好的那台电脑上导出。</b><br>
+            在项目目录执行 <code>python -m notesync.export_creds</code>，
+            它会打印一段文本（含微软凭据 + 小米 Cookie + 文件夹设置），整段复制粘到上面即可。<br><br>
+            <b>手动方式：</b>在已登录的浏览器里打开
+            <a href="https://outlook.live.com/mail/notes" target="_blank"
+               style="color:var(--accent2)">便笺网页版</a> → F12 → Network →
+            随便点开一条便笺 → 找一条发往 <code>substrate.office.com</code> 的请求 →
+            抄下 <code>Authorization</code> 和 <code>x-anchormailbox</code> 两个请求头。
+          </div>
+        </details>`);
     } else {
       // 方式 B 放在最前面：它是页面按钮，而且一次授权之后长期自动续期
       // 长篇说明一律收进 <details>：默认看不见，需要时点开 ——
@@ -1015,6 +1045,23 @@ function renderLoginBoxes(g, x, cfg){
 
     const gToReal = $("gToReal");
     if (gToReal) gToReal.onclick = () => switchMode("graph", "real");
+    // fabric 通道的「导入并验证」。后端会真的发一次请求 —— 所以这里**必须**给出
+    // 进行中的提示并禁用按钮，否则用户面对的是"点了没反应"（发布后实测踩过这个）。
+    const gFabSave = $("gFabSave");
+    if (gFabSave) gFabSave.onclick = async () => {
+      const p = ($("gFab").value || "").trim();
+      if (!p) { $("gFabMsg").textContent = "先粘一段凭据"; return; }
+      $("gFabMsg").textContent = "导入并验证中…（会真的请求一次便笺列表）";
+      gFabSave.disabled = true;
+      let r;
+      try { r = await api("/api/graph/token", {payload: p}); }
+      catch (e) { r = {ok: false, error: "请求失败：" + (e.message || e)}; }
+      gFabSave.disabled = false;
+      $("gFabMsg").textContent = r.ok
+        ? (r.message || "登录成功")
+        : ("失败：" + (r.error || ""));
+      gbox.dataset.sig = ""; refresh();
+    };
     const gTokSave = $("gTokSave");
     if (gTokSave) gTokSave.onclick = async () => {
       const tok = $("gTok").value.trim();
@@ -1319,11 +1366,22 @@ async function startQrLogin(){
 
 async function startGraphLogin(){
   const box = $("gLoginBox");
-  const r = await api("/api/graph/login/start", {});
+  const btn = $("gIn");
+  const msg = $("gDevMsg");
+  // ★ 这个请求要往返一次微软（本机实测约 1.5 秒，容器里更慢）。
+  //   旧版这里**既没有 loading 也没有 try/catch** —— 网络稍慢或一出错，
+  //   界面就毫无变化，表现成"点了没反应"。这是发布后用户实测反馈的第一个问题。
+  if (msg) msg.textContent = "正在向微软请求设备码…";
+  if (btn) btn.disabled = true;
+  let r;
+  try { r = await api("/api/graph/login/start", {}); }
+  catch (e) { r = {status: "error", error: "请求失败：" + ((e && e.message) || e)}; }
+  if (btn) btn.disabled = false;
   if (r.status === "error" || !r.user_code) {
-    $("gDevMsg").textContent = r.error || "启动失败";
+    if (msg) msg.textContent = r.error || "启动失败";
     return;
   }
+  if (msg) msg.textContent = "";
   box.dataset.locked = "1";     // 锁定，别让 2 秒刷新把设备码覆盖掉
   box.innerHTML = `
     <div class="code">1. 打开 <a href="${esc(r.verification_uri)}" target="_blank"

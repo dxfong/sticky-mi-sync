@@ -22,9 +22,22 @@ WORKDIR /app
 
 # 先装依赖（单独一层，改代码不会让依赖重装）
 COPY requirements.txt requirements-optional.txt ./
+
+# ★ pip 源做成可覆盖的。
+#   直连 pypi.org 在国内经常超时 —— 构建会卡在 "Connection to pypi.org
+#   timed out" 反复重试直到失败。国内构建请传：
+#     docker compose build --build-arg PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+#   或在 docker-compose.yml 里改 PIP_INDEX（那里已留好位置）。
+#   常见可选源：
+#     清华    https://pypi.tuna.tsinghua.edu.cn/simple
+#     阿里云  https://mirrors.aliyun.com/pypi/simple
+#     腾讯云  https://mirrors.cloud.tencent.com/pypi/simple
+#     中科大  https://pypi.mirrors.ustc.edu.cn/simple
+ARG PIP_INDEX=https://pypi.org/simple
+
 # migate：小米侧的 passToken 自动续期。容器里没有浏览器，
 # 首次登录走网页扫码（/api/xiaomi/qr/*），之后靠它自动换新。
-RUN pip install --no-cache-dir -r requirements-optional.txt
+RUN pip install --no-cache-dir -i "${PIP_INDEX}" -r requirements-optional.txt
 
 # 代码
 COPY . .

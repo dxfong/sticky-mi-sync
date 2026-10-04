@@ -9,7 +9,16 @@
 
 services:
   sticky-mi-sync:
-    build: .
+    build:
+      context: .
+      args:
+        # ★ 国内构建请换成本地 PyPI 镜像 —— 直连 pypi.org 经常超时，
+        #   表现就是构建卡在 "Connection to pypi.org timed out" 然后失败。
+        #   改这里，或在命令行临时覆盖（不用改文件）：
+        #     PIP_INDEX=https://mirrors.aliyun.com/pypi/simple docker compose up -d --build
+        #   常用源：清华 pypi.tuna.tsinghua.edu.cn/simple
+        #          阿里 mirrors.aliyun.com/pypi/simple
+        PIP_INDEX: "${PIP_INDEX:-https://pypi.org/simple}"
     image: sticky-mi-sync:latest
     container_name: sticky-mi-sync
     restart: unless-stopped

@@ -26,6 +26,12 @@ import time
 from typing import Any
 
 LOCK = threading.Lock()
+
+# 阶段 A（拿 loginUrl）的网络超时（秒）。
+# 这两步要连 i.mi.com；容器/服务器网络受限时会一直挂住，
+# 而它是跑在 HTTP 请求线程里的 —— 不设限就等于把接口挂死，前端只能干等。
+QR_TIMEOUT = 20
+
 STATE: dict[str, Any] = {
     "phase": "idle",      # idle | waiting | success | error
     "message": "",
@@ -162,39 +168,76 @@ def start(store) -> dict[str, Any]:
                      qr_url="", tips="", account="",
                      started_at=time.time(), expires_at=time.time() + 300)
 
-    try:
-        # migate 的 session 是模块级共享的，上一次尝试（或别处调用）留下的 cookie
-        # 会污染这次登录。每次开始前先清干净，保证是一次干净的握手。
+    # ★ 阶段 A 的两步都要连小米服务器（也就是这个函数会阻塞住 HTTP 请求线程）。
+    #   旧代码直接在这里同步调 get()，**没有任何超时** —— 容器里访问 i.mi.com
+    #   慢或被墙时就会一直挂住，前端停在"获取二维码…"不动（用户实测反馈）。
+    #   整段包进带超时的线程：超时就返回明确错误并提示改用粘贴 Cookie。
+    box: dict[str, Any] = {}
+
+    def _stage_a() -> None:
         try:
-            from migate.requester import session as _s
-            _s.cookies.clear()
-        except Exception:
-            pass
+            # migate 的 session 是模块级共享的，上一次尝试（或别处调用）留下的 cookie
+            # 会污染这次登录。每次开始前先清干净，保证是一次干净的握手。
+            try:
+                from migate.requester import session as _s
+                _s.cookies.clear()
+            except Exception:
+                pass
 
-        # 第 1 步：拿 serviceLogin 的会话参数
-        auth_data: dict[str, Any] = {"sid": "i.mi.com", "_json": True}
-        r = get(SERVICELOGIN_URL, params=auth_data)
-        head = json.loads(r.text[11:])
-        auth_data.update({
-            "serviceParam": head["serviceParam"],
-            "qs": head["qs"],
-            "callback": head["callback"],
-            "_sign": head["_sign"],
-            "_json": False,          # 长轮询这一步必须关掉 _json
-        })
+            # 第 1 步：拿 serviceLogin 的会话参数
+            auth_data: dict[str, Any] = {"sid": "i.mi.com", "_json": True}
+            r = get(SERVICELOGIN_URL, params=auth_data)
+            head = json.loads(r.text[11:])
+            auth_data.update({
+                "serviceParam": head["serviceParam"],
+                "qs": head["qs"],
+                "callback": head["callback"],
+                "_sign": head["_sign"],
+                "_json": False,          # 长轮询这一步必须关掉 _json
+            })
 
-        # 第 2 步：拿 loginUrl（扫码用）与长轮询地址 lp
-        r2 = get(LONGPOLLING_URL, params=auth_data)
-        info = json.loads(r2.text[11:])
-        login_url = info["loginUrl"]
-        lp = info["lp"]
-        timeout = int(info.get("timeout") or 120)
-        tips = info.get("qrTips", "")
+            # 第 2 步：拿 loginUrl（扫码用）与长轮询地址 lp
+            r2 = get(LONGPOLLING_URL, params=auth_data)
+            info = json.loads(r2.text[11:])
+            box.update(
+                ok=True,
+                auth_data=auth_data,
+                login_url=info["loginUrl"],
+                lp=info["lp"],
+                timeout=int(info.get("timeout") or 120),
+                tips=info.get("qrTips", ""),
+            )
+        except Exception as e:
+            box.update(ok=False, err=e)
 
+    th = threading.Thread(target=_stage_a, daemon=True)
+    th.start()
+    th.join(timeout=QR_TIMEOUT)
+
+    if th.is_alive():
+        with LOCK:
+            STATE.update(phase="error", message="连接小米服务器超时")
+        return {"ok": False, "error":
+                f"连接小米服务器超时（{QR_TIMEOUT} 秒无响应）。"
+                "请确认这台机器能访问 i.mi.com；"
+                "若网络受限，改用「粘贴 Cookie」登录。"}
+
+    if not box.get("ok"):
+        err = box.get("err")
+        with LOCK:
+            STATE.update(phase="error", message=f"获取二维码失败：{err}")
+        return {"ok": False, "error": str(err)}
+
+    auth_data = box["auth_data"]
+    lp = box["lp"]
+    login_url = box["login_url"]
+    timeout = box["timeout"]
+    tips = box["tips"]
+    try:
         svg = _qr_svg(login_url)
     except Exception as e:
         with LOCK:
-            STATE.update(phase="error", message=f"获取二维码失败：{e}")
+            STATE.update(phase="error", message=f"二维码渲染失败：{e}")
         return {"ok": False, "error": str(e)}
 
     with LOCK:

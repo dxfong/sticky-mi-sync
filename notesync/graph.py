@@ -819,6 +819,105 @@ class NotesFabricGraph:
                 "" if prof else "还没有网页版 profile —— 先跑 probe_onenote.py 登录一次"),
         }
 
+    def use_pasted_token(self, payload: str) -> dict[str, Any]:
+        """粘贴 NotesFabric 凭据（`MSAuth1.0 usertoken`）—— **容器里唯一的登录方式**。
+
+        为什么必须是"粘贴"：
+          fabric 的 usertoken 由 OWA / 便笺网页版在页面里生成，
+          **OAuth 流程拿不到它**（设备码也不行 —— 那条路换出来的是 Graph 令牌，
+          读不到 NotesFabric）。所以在全新环境（容器/服务器）里首次登录只有两条路：
+            ① 在容器里跑一次 headless 浏览器截取 —— 首次要交互登录，容器做不到；
+            ② 从**已经登录好的环境**（你自己的电脑）把凭据粘过来 —— 就是这个入口。
+
+        接受的写法（做了容错，不必手改成 JSON）：
+          1. 完整 JSON：
+               {"authorization": "MSAuth1.0 usertoken=\\"...\\"",
+                "anchormailbox": "MSA:you@outlook.com"}
+          2. 原始请求头（从浏览器 DevTools → 请求头 直接复制）：
+               Authorization: MSAuth1.0 usertoken="..."
+               x-anchormailbox: MSA:you@outlook.com
+          3. 只粘一行 token 字符串（会自动补上 sdkversion）。
+
+        粘完立刻发一次请求验证 —— 「保存了」和「能用」是两件事，
+        不验证的话用户会拿着一个过期令牌对着空列表猜。
+        """
+        payload = (payload or "").strip()
+        if not payload:
+            raise RuntimeError("内容是空的")
+
+        auth: dict[str, Any] = {}
+
+        # ---- 写法 1：JSON
+        if payload.startswith("{"):
+            try:
+                auth = json.loads(payload)
+            except Exception as e:
+                raise RuntimeError(f"看着像 JSON 但解析失败：{e}")
+
+        # ---- 写法 2/3：按行解析 HTTP 头（大小写与前缀都容错）
+        if not auth:
+            for line in payload.splitlines():
+                line = line.strip()
+                if not line or ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                k = k.strip().lower().replace("_", "-")
+                v = v.strip().strip('"').strip("'")
+                if k in ("authorization", "authorization-header"):
+                    auth["authorization"] = v
+                elif k in ("x-anchormailbox", "anchormailbox", "x-anchor-mailbox"):
+                    auth["anchormailbox"] = v
+                elif k in ("stickynotes-sdkversion", "sdkversion"):
+                    auth["sdkversion"] = v
+            # ---- 写法 3：整段就是一行裸 token
+            if not auth and payload.count("\n") == 0:
+                auth["authorization"] = payload
+
+        auth = {k: str(v).strip() for k, v in auth.items() if v}
+        auth.setdefault("sdkversion", "StickyNotes-Web/11.5.10")
+
+        # ---- 格式预检：拦掉"粘错东西"，给出能照着做的提示
+        az = auth.get("authorization", "")
+        if not az:
+            raise RuntimeError(
+                "没解析出 authorization。请从浏览器 DevTools 的请求头里整段复制 "
+                "Authorization: MSAuth1.0 usertoken=\\\"...\\\" 那一行粘过来")
+        if "MSAuth1.0" not in az and not az.startswith("Ew"):
+            raise RuntimeError(
+                "这段 Authorization 不像是 NotesFabric 的令牌（应以 MSAuth1.0 usertoken= 开头）。"
+                "⚠ 别拿 Graph 的令牌（eyJ0eXAi... 那种 JWT）来粘 —— "
+                "那是另一套通道，读不到 2026 年的便笺。")
+
+        # ---- 保存后立刻验证；**不过就回滚**。
+        #   旧顺序是"已保存 + 报验证失败"，既自相矛盾，又把一份用不了的凭据
+        #   留在库里（下次启动还会拿它去试，报一堆 401）。
+        prev = self.auth.load()
+        self.auth.save(auth)
+        self.store.log(f"微软便笺：已导入 NotesFabric 凭据"
+                       f"（{auth.get('anchormailbox', '账号未知')}）")
+        try:
+            self.last_error = ""
+            notes = self.client.list_all(page_limit=1)
+        except Exception as e:
+            if prev.get("authorization"):
+                self.auth.save(prev)          # 回滚到导入前的状态
+            else:
+                self.auth.clear()
+            self.last_error = str(e)
+            raise RuntimeError(
+                f"凭据已导入，但微软拒绝了这次请求：{e}\n"
+                "常见原因：① 令牌已过期 —— 重新导出一次；"
+                "② 导出时用的不是同一个账号；"
+                "③ 复制的不完整（usertoken 很长，注意别漏尾部）；"
+                "④ 那台机器的便笺网页版本身也已掉登录。")
+
+        return {
+            "ok": True,
+            "account": str(auth.get("anchormailbox", "")).replace("MSA:", ""),
+            "verified_count": len(notes),
+            "message": f"导入成功，已读到 {len(notes)} 条便笺（首页）",
+        }
+
     def list_notes(self, max_pages: int | None = None) -> list[dict[str, Any]]:
         """拉便笺列表。
 

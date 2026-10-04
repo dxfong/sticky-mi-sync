@@ -30,17 +30,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
     #   adopt_both           两边都收（两边本来就是干净的才用，否则会重复一遍）
     "initial_pairing": "graph_authoritative",
     "graph": {
-        "mode": "mock",              # mock | real
-        "client_id": "",             # Azure 应用注册的 Application (client) ID
+        # ★ 默认就是 fabric —— 这是**唯一数据完整**的通道。
+        #   别再改回 mock/real：mock 会在 build_graph 里静默落到 RealGraph，
+        #   而 real（Graph API）读不到 2026 年的便笺（那条通道没有新格式数据）。
+        #   全新部署必须开箱即用，所以默认值只能是真正能用的那个。
+        "mode": "fabric",            # fabric（推荐）| real
+        "client_id": "",             # Azure 应用注册的 Application (client) ID（仅 real 模式用）
         "tenant": "common",          # 个人账号用 common 或 consumers
         "scope": "ShortNotes.ReadWrite offline_access",
     },
     "xiaomi": {
-        "mode": "mock",              # mock | real
+        "mode": "real",              # mock 已停用；real 是唯一在线模式
         "base_url": "https://i.mi.com",
         "folder_name": "微软便笺",    # 目标文件夹（按名字找，找不到会告警）
         "folder_id": "",             # 也可以直接填 folderId 跳过按名查找
-        "write_enabled": False,      # 小米写入接口形态未验证，默认关闭
+        "write_enabled": True,       # 写入接口已实测可用（2026-09 验证）
         "warn_interval_sec": 30,     # 低于这个间隔会告警（小米风控）
 
         # ---- 写入节流（防风控）----
@@ -139,6 +143,12 @@ class Store:
         self.db.executescript(SCHEMA)
         self.db.commit()
         self.cfg = self._load_config()
+        # ★ 首次启动就把默认配置落盘。
+        #   不写的话 config.json 压根不存在 —— 用户"找不到配置文件"，
+        #   发布前的冒烟测试也读不到默认通道（实测踩到）。
+        #   落盘还有个好处：用户能直接看到有哪些可改项，不用去翻代码。
+        if not self.cfg_path.exists():
+            self.save_config()
 
     # ---------------------------------------------------------------- 配置
     def _load_config(self) -> dict[str, Any]:
