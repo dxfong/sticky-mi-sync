@@ -904,10 +904,10 @@ class NotesFabricGraph:
         # ---- 保存后立刻验证；**不过就回滚**。
         #   旧顺序是"已保存 + 报验证失败"，既自相矛盾，又把一份用不了的凭据
         #   留在库里（下次启动还会拿它去试，报一堆 401）。
+        #   ★ 日志也必须在**验证通过之后**才记 —— 否则会出现
+        #     "日志说导入成功、凭据表里却什么都没有"（用户实测踩到过，非常误导）。
         prev = self.auth.load()
         self.auth.save(auth)
-        self.store.log(f"微软便笺：已导入 NotesFabric 凭据"
-                       f"（{auth.get('anchormailbox', '账号未知')}）")
         try:
             self.last_error = ""
             notes = self.client.list_all(page_limit=1)
@@ -918,11 +918,17 @@ class NotesFabricGraph:
                 self.auth.clear()
             self.last_error = str(e)
             raise RuntimeError(
-                f"凭据已导入，但微软拒绝了这次请求：{e}\n"
-                "常见原因：① 令牌已过期 —— 重新导出一次；"
-                "② 导出时用的不是同一个账号；"
-                "③ 复制的不完整（usertoken 很长，注意别漏尾部）；"
-                "④ 那台机器的便笺网页版本身也已掉登录。")
+                f"凭据格式没问题，但微软拒绝了这次请求：{e}\n"
+                "**最可能的原因是 token 已经轮换了** —— NotesFabric 的 usertoken\n"
+                "换得很勤（分钟级），而你在 DevTools 里看到的往往是**已经发生过的旧请求**。\n"
+                "请这样做：在便笺网页上**点开一条便笺**（触发一次新请求）→\n"
+                "回到 Network 面板找到那条**最新**的 substrate.office.com 请求 →\n"
+                "立刻复制它的 Authorization / x-anchormailbox。\n"
+                "其它可能：复制不完整（usertoken 很长）、账号不对、"
+                "或那台机器的便笺网页版本身已掉登录。")
+
+        self.store.log(f"微软便笺：已导入 NotesFabric 凭据并验证通过"
+                       f"（{auth.get('anchormailbox', '账号未知')}）")
 
         return {
             "ok": True,
