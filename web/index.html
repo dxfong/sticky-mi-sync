@@ -248,15 +248,23 @@
       <div class="row">
         <label class="kv">间隔(秒) <input type="number" id="interval" min="1" max="3600"></label>
         <label class="kv">冲突策略
-          <select id="conflict">
-            <option value="keep_both">保留双方（推荐）</option>
+          <select id="conflict"
+                  title="两侧**都改了**同一条时怎么办。
+· 保留双方：把小米那版另存成一条「[冲突副本]」，谁也不丢；列表里这条会显示成一绿一黄（绿灯在最后更改的那一侧）
+· 以最后修改为准：直接比时间，较新的那版覆盖较旧的，不生成副本">
+            <option value="keep_both">保留双方</option>
+            <option value="newest_wins">以最后修改为准</option>
           </select></label>
         <label class="kv">首次配对
-          <select id="pairing">
-            <option value="graph_authoritative">以便笺为准</option>
-            <option value="adopt_both">两边都收</option>
+          <select id="pairing"
+                  title="第一次同步时，**小米里已经存在、而便笺里没有**的笔记本怎么处理。
+（两侧内容相同的，用列表上方的「按内容配对」认亲即可，不受这里影响）
+
+· 小米里已有的不动：只把便笺推过去 —— 不会重复
+· 也收过来（可能重复）：把小米里那些也建到便笺里">
+            <option value="graph_authoritative">小米里已有的不动</option>
+            <option value="adopt_both">也收过来（可能重复）</option>
           </select></label>
-        <label class="kv"><input type="checkbox" id="dryToggle"> 全局预演模式（不写任何数据）</label>
         <button id="btnSaveCfg">保存设置</button>
         <!-- 「退出登录」已搬到顶部「账号与登录」面板里 —— 它属于身份操作，
              和间隔 / 冲突策略这些日常配置不是一类东西。 -->
@@ -550,7 +558,9 @@ async function refresh(){
   renderFolderBox(false, x.connected);
 
   $("interval").value = st.config.sync_interval_sec;
-  $("dryToggle").checked = !!st.config.dry_run;
+  // 预演模式的界面入口已移除（那个开关在日常使用里没有意义，
+  // 留着只会让人误开、然后奇怪"为什么同步不动"）。
+  // 后端 /api/sync 仍然接受 dry_run，需要时可用 API 调用。
   $("pairing").value = st.config.initial_pairing || "graph_authoritative";
   // （连接模式下拉已移除：微软固定 fabric、小米固定 real）
   $("cfgWarn").textContent = (x.mode === "real" && st.config.sync_interval_sec < 30)
@@ -1763,7 +1773,6 @@ $("btnLogout").onclick = async () => {
 $("btnSaveCfg").onclick = async () => {
   await api("/api/config", {patch:{
     sync_interval_sec: Number($("interval").value) || 5,
-    dry_run: $("dryToggle").checked,
     initial_pairing: $("pairing").value,
     conflict_policy: $("conflict").value,
   }});
@@ -1843,6 +1852,17 @@ function closeDetail(){
   d.dataset.key = "";
 }
 $("detailClose").onclick = closeDetail;
+
+// 点面板**以外**任何地方也收回 —— 用惯了的人都这样点，
+// 只能按"关闭"按钮会很别扭。判据是"点击目标正好是遮罩本身"：
+// 面板内部的点击 target 会是里面的元素，不会命中这里。
+$("detail").addEventListener("click", (e) => {
+  if (e.target === $("detail")) closeDetail();
+});
+// Esc 也收回（键盘用户）
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("detail").classList.contains("open")) closeDetail();
+});
 $("detailCopy").onclick = async () => {
   const k = $("detail").dataset.key;
   if (!k) return;

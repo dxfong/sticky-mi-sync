@@ -823,30 +823,78 @@ class SyncEngine:
                             self._relink(mi_id, gid, m["text"], None, None,
                                          gid, res.get("change_key", ""))
                     else:
-                        # 冲突：微软便笺是权威源，把小米侧的版本另存为新便笺，谁也不丢
-                        plan(ACTION_CONFLICT, f"两边都改了：{gid[:8]} / {mi_id}")
-                        if not dry:
-                            # 冲突副本保留小米侧**原本的修改时间**，
-                            # 否则它会排到列表最前，破坏便笺侧的时间顺序
-                            dup = self.graph.create_note(
-                                "[冲突副本] " + (m["text"] or "")[:2000],
-                                when_iso=ms_to_iso(m.get("modify_date")))
-                            self.store.log(
-                                f"冲突：小米侧版本已另存为便笺 {dup['id'][:8]}", "warn")
-                            publish("graph", 
-                                self._g_item(dup["id"],
-                                             "[冲突副本] " + (m["text"] or "")[:2000],
-                                             dup.get("change_key", ""),
-                                             ms_to_iso(m.get("modify_date"))))
-                            if xiaomi_ok:
-                                self.xiaomi.update_note(
-                                    mi_id, g["text"],
-                                    when_ms=iso_to_ms(g.get("modified_iso")))
-                                publish("xiaomi", 
-                                self._m_item(mi_id, g["text"],
-                                             self._mi_patch_time(iso_to_ms(g.get("modified_iso")))))
-                            self._relink(mi_id, gid, g["text"], g, m_notes, mi_id,
-                                         conflict=0)
+                        # ── 两边都改了：按**冲突策略**处理 ──
+                        #
+                        # 以前这里写死"保留双方"，而界面上那个下拉框
+                        # （conflict_policy）**后端从来没读过** —— 摆了半年没人发现，
+                        # 因为只有一种选项，选什么都没差别。现在真读它。
+                        conflict_policy = str(
+                            self.store.cfg.get("conflict_policy") or "keep_both")
+                        g_time = g.get("modified_iso") or ""
+                        m_time = ms_to_iso(m.get("modify_date")) or ""
+
+                        if conflict_policy == "newest_wins":
+                            # 「以最后更改的为准」：比时间，新的一侧赢，覆盖另一侧。
+                            # 不生成副本 —— 用户明确要的是"以最后更改的内容为准"。
+                            newer_is_xiaomi = m_time > g_time
+                            plan(ACTION_CONFLICT,
+                                 f"两边都改了 → 以较新的（{'小米' if newer_is_xiaomi else '便笺'}）为准："
+                                 f"{gid[:8]} / {mi_id}")
+                            if not dry:
+                                if newer_is_xiaomi:
+                                    # 小米更新 → 覆盖便笺
+                                    res = self.graph.update_note(
+                                        gid, m["text"],
+                                        link.get("graph_changekey") or "",
+                                        when_iso=m_time)
+                                    publish("graph",
+                                            self._g_item(gid, m["text"],
+                                                         res.get("change_key", ""), m_time))
+                                    self._relink(mi_id, gid, m["text"], None, None,
+                                                 gid, res.get("change_key", ""))
+                                elif xiaomi_ok:
+                                    # 便笺更新 → 覆盖小米
+                                    self.xiaomi.update_note(
+                                        mi_id, g["text"],
+                                        when_ms=iso_to_ms(g.get("modified_iso")))
+                                    publish("xiaomi",
+                                            self._m_item(mi_id, g["text"],
+                                                         self._mi_patch_time(
+                                                             iso_to_ms(g.get("modified_iso")))))
+                                    self._relink(mi_id, gid, g["text"], g, m_notes, mi_id)
+                                else:
+                                    # 便笺更新但小米侧写不了 —— 不能什么都不做，
+                                    # 否则这条会被反复判定为冲突。记一笔告警，下轮再试。
+                                    self.store.log(
+                                        f"冲突（以最后更改为准）：便笺较新但小米只读，"
+                                        f"本轮无法写回 {mi_id[:8]}", "warn")
+                        else:
+                            # 「保留双方」：微软便笺是权威源，把小米侧的版本另存为新便笺，
+                            # 谁也不丢 —— 列表里那条就会显示成"一绿一黄"
+                            # （两侧内容不同，绿灯在最后更改的那一侧）。
+                            plan(ACTION_CONFLICT, f"两边都改了：{gid[:8]} / {mi_id}")
+                            if not dry:
+                                # 冲突副本保留小米侧**原本的修改时间**，
+                                # 否则它会排到列表最前，破坏便笺侧的时间顺序
+                                dup = self.graph.create_note(
+                                    "[冲突副本] " + (m["text"] or "")[:2000],
+                                    when_iso=ms_to_iso(m.get("modify_date")))
+                                self.store.log(
+                                    f"冲突：小米侧版本已另存为便笺 {dup['id'][:8]}", "warn")
+                                publish("graph", 
+                                    self._g_item(dup["id"],
+                                                 "[冲突副本] " + (m["text"] or "")[:2000],
+                                                 dup.get("change_key", ""),
+                                                 ms_to_iso(m.get("modify_date"))))
+                                if xiaomi_ok:
+                                    self.xiaomi.update_note(
+                                        mi_id, g["text"],
+                                        when_ms=iso_to_ms(g.get("modified_iso")))
+                                    publish("xiaomi", 
+                                    self._m_item(mi_id, g["text"],
+                                                 self._mi_patch_time(iso_to_ms(g.get("modified_iso")))))
+                                self._relink(mi_id, gid, g["text"], g, m_notes, mi_id,
+                                             conflict=0)
                     continue
 
                 # ↓↓ limit 模式的安全阀 ↓↓
