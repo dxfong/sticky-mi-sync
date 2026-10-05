@@ -1156,11 +1156,12 @@ function renderLoginBoxes(g, x, cfg){
            ✅ 已建立持久登录态 —— 凭据过期会自动静默续期，不用再登录
            ${prof.device_days_left ? `（可信设备还有 ${prof.device_days_left} 天）` : ""}
          </div>`
-      : `<div class="kv" style="margin-top:4px;color:var(--warn)">
-           ⚠️ 凭据当前有效，但**不能自动续期** ——
-           容器 / 服务器里没有浏览器 profile，passToken 换证又可能被小米的安全验证拦下。<br>
-           <span style="color:var(--dim)">过期后（一般几天到几周）回到这里，
-           用上面的<b>账号密码登录</b>重新登一次就行，一分钟的事。</span>
+      : `<div class="kv" style="margin-top:4px;color:var(--dim)">
+           ℹ️ 没有浏览器 profile（容器里都是这样）—— 但这**不影响自动续期**：
+           serviceToken 过期时程序会用本地保存的 <code>passToken</code>
+           自动换一个新的，纯 HTTP、约 3 秒，你感觉不到。<br>
+           只有当 <b>passToken 本身失效</b>时（比如你在小米侧点了「退出所有设备」）
+           才需要回来重登一次 —— 正常情况下不用管。
          </div>`;
 
     xparts.push(`<div class="row" style="align-items:center">

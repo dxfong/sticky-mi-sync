@@ -340,21 +340,29 @@ class RealXiaomi:
         c = self._cookie()
         if c.get("serviceToken") and c.get("userId"):
             return
-        # ★ 凭据不完整时**先自己试着静默补齐**，再报错。
+        # ★ 凭据不完整时**先自己试着补齐**，再报错。
         #
-        # 为什么：小米的 cookie 会在若干情形下变成"只有一半"
-        # （profile 里读到的比库里新、某次写入只落了部分字段、续期回滚拿到空备份
-        # 等等）。这时直接抛错就变成"看起来凭据坏了"的假故障 ——
-        # 而实际上浏览器 profile 里就有现成登录态，读一次就好。
-        # 用户实测踩到过：日志突然冒出"还没登录小米账号"，十几秒后又自己好了
-        # （因为下一次操作顺带触发了续期）。这里把它变成**当场自愈**。
-        if not self._refreshing and self._try_silent_reaquire():
-            c = self._cookie()
-            if c.get("serviceToken") and c.get("userId"):
-                return
+        # 顺序有讲究：**先试 passToken 换证，再试浏览器 profile**。
+        #   · passToken 换证是纯 HTTP —— 容器 / 服务器里就能做，约 3 秒；
+        #    · 浏览器 profile 只有本机 Windows 才有，容器里必然拿不到。
+        # 以前只试了后者，于是容器里每次都是"尝试补齐失败 → 报错让你重新登录"，
+        # 而其实第一条路就能自愈（用户实测质疑过"难道每隔几天都要重登"）。
+        if not self._refreshing:
+            healed = False
+            try:
+                if self.store.get_cred("xiaomi_pass_token"):
+                    healed = self._refresh_token()
+            except Exception:
+                healed = False
+            if not healed and self._try_silent_reaquire():
+                healed = True
+            if healed:
+                c = self._cookie()
+                if c.get("serviceToken") and c.get("userId"):
+                    return
         miss = [k for k in ("serviceToken", "userId") if not c.get(k)]
         raise RuntimeError(
-            f"小米凭据不完整（缺 {'、'.join(miss)}）。"
+            f"小米凭据不完整（缺 {'、'.join(miss)}），自动补齐也没成功。"
             f"请到页面「账号与登录 → 小米笔记」卡片里，"
             f"用最上方的**账号密码登录**重新登录一次 —— "
             f"全程在这个页面完成（含短信/邮箱验证码），不需要本机浏览器。")

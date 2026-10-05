@@ -163,10 +163,12 @@ def profile_life(profile: str | Path) -> dict:
         "conclusion": "",
     }
     if not profile.is_dir():
-        out["conclusion"] = ("这个环境里没有浏览器 profile（容器 / 服务器都是这样）——"
-                             "凭据无法自动续期，因为 passToken 换证可能被小米的"
-                             "安全验证拦住。**凭据过期后回到页面用「账号密码登录」"
-                             "重新登一次即可**，一分钟的事。")
+        out["conclusion"] = ("这个环境里没有浏览器 profile（容器 / 服务器都是这样）"
+                             "—— 但这**不影响自动续期**："
+                             "serviceToken 过期时用本地保存的 passToken 直接换新的就行"
+                             "（纯 HTTP，约 3 秒）。"
+                             "只有 passToken 本身失效（比如在小米侧退出了所有设备）"
+                             "才需要重新登录一次。")
         return out
 
     db = cookie_db(profile)
@@ -199,10 +201,10 @@ def profile_life(profile: str | Path) -> dict:
 
     if not ls["has_login"]:
         out["conclusion"] = (
-            "profile 里**没有** i.mi.com 的登录态（localStorage 里找不到痕迹）"
-            "—— 静默续期不可用。凭据过期后回页面用「账号密码登录」重登一次即可；"
-            "若这台机器本身有浏览器，也可以跑 `python -m notesync.browser_auth` "
-            "建立持久登录态（那样以后就不用再登了）。"
+            "profile 里没有 i.mi.com 的登录态 —— 也就是说**这条路**（靠浏览器 profile "
+            "静默续期）不可用。但这**不影响自动续期**：程序用的是本地保存的 "
+            "passToken 直接换新 serviceToken（纯 HTTP，约 3 秒），"
+            "容器里跑得好好的。只有 passToken 本身失效时才需要重登。"
         )
     elif out["device_days_left"] > 0:
         out["conclusion"] = (
