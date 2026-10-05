@@ -25,6 +25,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sync_interval_sec": 5,
     "dry_run": False,
     "conflict_policy": "keep_both",
+    # 两侧内容有细微差异、**且修改时间也区分不出谁新**时，以哪一侧为准。
+    #   ""       = 不指定 → 两盏灯都显示黄（"我看不出谁对，你自己判断"）
+    #   "graph"  = 以微软便笺为准
+    #   "xiaomi" = 以小米为准
+    # 只在**时间完全相同**时才用得上 —— 时间能分出先后就用较新的那侧。
+    "diff_pref": "",
     # 首次配对策略：
     #   graph_authoritative  只把便笺推到小米，小米侧已有的笔记保持不动（默认）
     #   adopt_both           两边都收（两边本来就是干净的才用，否则会重复一遍）

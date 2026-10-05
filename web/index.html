@@ -265,6 +265,23 @@
             <option value="graph_authoritative">小米里已有的不动</option>
             <option value="adopt_both">也收过来（可能重复）</option>
           </select></label>
+        <label class="kv">细微差异以谁为准
+          <select id="diffPref"
+                  title="两侧内容**只有细微差异**（空格/换行等）、而且**修改时间也分不出先后**时，
+列表里那两盏灯该往哪边亮。
+
+· 不指定（两侧都亮黄）：把判断交给你 —— 最保守
+· 以微软便笺为准：微软侧亮绿
+· 以小米为准：小米侧亮绿
+
+⚠ 这只影响**指示灯显示**（告诉你"哪边算准"）。
+   真正的内容对齐仍按「冲突策略」走 —— 两者是不同的时机：
+   · 指示灯 = 你还没动手时，先告诉你现状
+   · 冲突策略 = 同步真要把两边改成一样时，用哪一侧的内容">
+            <option value="">不指定（两侧都亮黄）</option>
+            <option value="graph">以微软便笺为准</option>
+            <option value="xiaomi">以小米为准</option>
+          </select></label>
         <button id="btnSaveCfg">保存设置</button>
         <!-- 「退出登录」已搬到顶部「账号与登录」面板里 —— 它属于身份操作，
              和间隔 / 冲突策略这些日常配置不是一类东西。 -->
@@ -562,6 +579,7 @@ async function refresh(){
   // 留着只会让人误开、然后奇怪"为什么同步不动"）。
   // 后端 /api/sync 仍然接受 dry_run，需要时可用 API 调用。
   $("pairing").value = st.config.initial_pairing || "graph_authoritative";
+  $("diffPref").value = st.config.diff_pref || "";
   // （连接模式下拉已移除：微软固定 fabric、小米固定 real）
   $("cfgWarn").textContent = (x.mode === "real" && st.config.sync_interval_sec < 30)
     ? "⚠ 真实小米接口建议间隔 ≥ 30 秒，5 秒高频轮询有风控风险" : "";
@@ -598,17 +616,36 @@ async function refresh(){
         return [lamp(NG, "on", "：有 · 与小米一致"),
                 lamp(NX, "on", "：有 · 与便笺一致")];
       }
-      // 两侧都有但内容不一致 —— 时间较新的那一侧是绿，另一侧是黄。
-      // （新的那侧＝"最后更改的一侧"，正是这一轮该往外推的内容。）
-      const gNewer = String(g.time || "") >= String(m.time || "");
+      // 两侧都有但内容不一致（含"只有空格/换行不同"这种细微差异）。
+      // 规则：**时间能分出先后的，较新的那侧亮绿**（它就是这轮该往外推的内容）；
+      //      **时间也一样的，说明没有任何依据判断谁对 —— 两侧都亮黄**，
+      //      并把决定权交给设置里的「细微差异以哪侧为准」。
+      const gt = String(g.time || ""), mt = String(m.time || "");
+      if (gt === mt) {
+        // 用 lastState（模块级）而不是 st —— st 是 boot() 的局部变量，
+        // 在这个函数里根本读不到，写成 st 会直接 ReferenceError。
+        const pref = (lastState && lastState.config && lastState.config.diff_pref) || "";
+        if (pref === "graph") {
+          return [lamp(NG, "on", "：有 · 与小米不一致（时间相同，按设置以微软为准）"),
+                  lamp(NX, "warn", "：有 · 与便笺不一致（时间相同，按设置以微软为准）")];
+        }
+        if (pref === "xiaomi") {
+          return [lamp(NG, "warn", "：有 · 与小米不一致（时间相同，按设置以小米为准）"),
+                  lamp(NX, "on", "：有 · 与便笺不一致（时间相同，按设置以小米为准）")];
+        }
+        return [lamp(NG, "warn", "：有 · 与小米不一致（时间相同，无法判断以谁为准）"),
+                lamp(NX, "warn", "：有 · 与便笺不一致（时间相同，无法判断以谁为准）")];
+      }
+      const gNewer = gt > mt;
       return gNewer
         ? [lamp(NG, "on", "：有 · 较新（内容与小米不一致）"),
            lamp(NX, "warn", "：有 · 较旧（内容与便笺不一致）")]
         : [lamp(NG, "warn", "：有 · 较旧（内容与小米不一致）"),
            lamp(NX, "on", "：有 · 较新（内容与便笺不一致）")];
     }
-    if (g) return [lamp(NG, "on", "：有这条"), lamp(NX, "off", "：没有这条")];
-    if (m) return [lamp(NG, "off", "：没有这条"), lamp(NX, "on", "：有这条")];
+    // 只有一侧有 → 另一侧会由同步补建（"一侧有一侧没有的互相同步"）
+    if (g) return [lamp(NG, "on", "：有这条"), lamp(NX, "off", "：没有 —— 同步时会补建到小米")];
+    if (m) return [lamp(NG, "off", "：没有 —— 同步时会补建到便笺"), lamp(NX, "on", "：有这条")];
     return [lamp(NG, "off", "：没有"), lamp(NX, "off", "：没有")];
   };
 
@@ -1775,6 +1812,7 @@ $("btnSaveCfg").onclick = async () => {
     sync_interval_sec: Number($("interval").value) || 5,
     initial_pairing: $("pairing").value,
     conflict_policy: $("conflict").value,
+    diff_pref: $("diffPref").value,
   }});
   refresh();
 };

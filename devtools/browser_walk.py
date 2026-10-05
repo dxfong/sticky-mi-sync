@@ -172,6 +172,15 @@ def main() -> int:
         ok("点开展开设置", page.locator("#cfgBox").is_visible())
         ok("有间隔输入框", page.locator("#interval").count() > 0)
         ok("有保存按钮", page.locator("#btnSaveCfg").count() > 0)
+        # 三个下拉都要在，而且选项数要对
+        for sel, name, want in [
+            ("#conflict", "冲突策略", 2),
+            ("#pairing", "首次配对", 2),
+            ("#diffPref", "细微差异以哪侧为准", 3),
+        ]:
+            n = page.locator(f"{sel} option").count()
+            ok(f"{name} 有 {want} 个选项", n == want, f"实际 {n} 个")
+        ok("预演模式已移除", page.locator("#dryToggle").count() == 0)
         page.screenshot(path=str(SHOTS / "05-设置展开.png"))
 
         # ---- 7. 回收站 & 日志
