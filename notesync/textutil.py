@@ -352,17 +352,20 @@ def pair_key(text: str | None) -> str:
          中文里这种空格通常只是输入/分词习惯，不影响语义，
          但对哈希来说就是"两条不同的内容"，于是永远配不上。
 
-    只对**非 ASCII 之间**放宽：英文里空格是有语义的（`a b` ≠ `ab`），
-    所以 `a b` 和 `ab` 仍然判为不同。
+    规则：**整句含中文 → 所有空格都不参与比较**；纯 ASCII 仍严格。
+
+    ★ 为什么不是"只看空格两侧"：
+      实测剩下配不上的，空格出现在各种位置，按"两侧字符"判会漏：
+        `4+2江西`     ↔ `4+2 江西`        （数字与中文之间）
+        `v2ray&url=`  ↔ `v2ray & url=`    （两侧都是 ASCII，但整句是中英混排）
+      中文笔记里"中英之间加不加空格"纯粹是输入习惯，不承载语义 ——
+      只要整句是中文语境，空格就别参与比较，规则也更好解释。
+      而 `hello world` ↔ `helloworld`（纯英文）仍必须判为不同，单测锁了这条。
     """
     s = canon(text)
-    out: list[str] = []
-    for i, ch in enumerate(s):
-        if ch == " " and 0 < i < len(s) - 1:
-            if ord(s[i - 1]) > 127 and ord(s[i + 1]) > 127:
-                continue        # 左右都是中文 → 这个空格不参与比较
-        out.append(ch)
-    return "".join(out)
+    if not any(ord(c) > 127 for c in s):
+        return s                    # 纯 ASCII：原样，空格敏感
+    return s.replace(" ", "")       # 含中文：空格一律不参与比较
 
 
 def pair_hash(text: str | None) -> str:
