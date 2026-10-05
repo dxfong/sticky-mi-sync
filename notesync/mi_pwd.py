@@ -83,6 +83,12 @@ def _load_login_ctx() -> dict[str, Any]:
         return dict(_LOGIN_CTX)
 
 
+def _drop_login_ctx() -> None:
+    """用完立刻清掉 —— 里面带着密码哈希，不该在内存里常驻。"""
+    with LOCK:
+        _LOGIN_CTX.clear()
+
+
 def status() -> dict[str, Any]:
     with LOCK:
         return dict(STATE)
@@ -97,6 +103,8 @@ def reset() -> None:
             context="", options=[], address_type="", account_mask="",
             quota=None, sent_to="", started_at=time.time(), user=user,
         )
+    # 上一轮的登录上下文（含上一轮的密码哈希）必须丢掉
+    _drop_login_ctx()
 
 
 def _set(**kw: Any) -> None:
@@ -165,8 +173,6 @@ def login(user: str, password: str, capt_code: str = "") -> dict[str, Any]:
             "callback": head["callback"],
             "_sign": head["_sign"],
         })
-        # ★ 留着 —— 二次验证通过后要用同一份重新登录，别再去 GET 一次
-        _save_login_ctx(auth_data)
     except Exception as e:
         _set(phase="error", message=f"连不上小米登录服务：{e}")
         return {"ok": False, "error": str(e)}
@@ -175,6 +181,14 @@ def login(user: str, password: str, capt_code: str = "") -> dict[str, Any]:
     payload.update({"user": user, "hash": _md5_upper(password)})
     if capt_code:
         payload["captCode"] = capt_code
+
+    # ★ 把 user/hash 也一起留着 —— 二次验证通过后要**带着账号密码**重新登录一次。
+    #   实测：只传 serviceParam/qs/_sign 会被小米拒掉，返回
+    #   `code 70016 登录验证失败`。migate 的 auth_data 里就始终带着 user/hash
+    #  （terminal.py 里 `auth_data["user"] = user; auth_data["hash"] = pwd`），
+    #   所以它最后那次 `post(AUTH2, data=auth_data)` 是有凭据的。
+    #   ⚠ 这里只在**内存**里存，不落盘，并且验证成功后立刻清掉（见 _drop_login_ctx）。
+    _save_login_ctx(payload)
 
     try:
         r = post(SERVICELOGINAUTH2_URL, data=payload, timeout=STEP_TIMEOUT)
@@ -379,11 +393,15 @@ def check_code(ticket: str) -> dict[str, Any]:
         return {"ok": False, "error": "小米又要求了一次验证，请重试"}
 
     if d2.get("code") != 0:
-        msg = d2.get("tips") or str(d2)
+        msg = d2.get("tips") or d2.get("desc") or str(d2)
         _set(phase="error", message=f"验证通过了，但重新登录失败：{msg}")
         return {"ok": False, "error": f"重新登录失败：{msg}"}
 
-    return {"ok": True, **_harvest()}
+    # 拿到凭据了 —— 密码哈希用完就丢，不留在内存里
+    try:
+        return {"ok": True, **_harvest()}
+    finally:
+        _drop_login_ctx()
 
 
 # ------------------------------------------------------------------ 收尾
