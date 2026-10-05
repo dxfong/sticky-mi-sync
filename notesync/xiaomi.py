@@ -360,6 +360,14 @@ class RealXiaomi:
                 c = self._cookie()
                 if c.get("serviceToken") and c.get("userId"):
                     return
+        # ★ 续期正在进行时，cookie 可能处于"已清旧值、还没写新值"的中间态 ——
+        #   这时**不能报成"凭据坏了、请重新登录"**（用户实测被这条误导过：
+        #   日志刷出"请用账号密码登录"，而同一秒凭据其实自己就换好了）。
+        #   它是**临时状态**，下一轮自然就恢复，如实说清楚即可。
+        if self._refreshing:
+            raise RuntimeError(
+                "小米凭据正在续期中（本轮先跳过，下一轮会自动恢复）。"
+                "若长时间一直如此，再用页面的「账号密码登录」重登一次。")
         miss = [k for k in ("serviceToken", "userId") if not c.get(k)]
         raise RuntimeError(
             f"小米凭据不完整（缺 {'、'.join(miss)}），自动补齐也没成功。"
@@ -557,7 +565,12 @@ class RealXiaomi:
             self._get("/note/full/page", {"limit": 1}, _retry=False)
             return True
         except Exception as e:
-            self.last_error = f"续期拿到的凭据仍然读不了笔记：{e}"
+            msg = str(e)
+            # 续期是自己调起来的，此时 cookie 可能正处于中间态 ——
+            # 那种"正在续期中"的话术不是真的失败原因，照抄进日志只会更误导。
+            if "正在续期中" in msg:
+                msg = "凭据还在换发中（中间态）"
+            self.last_error = f"续期拿到的凭据仍然读不了笔记：{msg[:160]}"
             return False
 
     def _refresh_token(self) -> bool:
