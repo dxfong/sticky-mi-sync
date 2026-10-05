@@ -510,6 +510,10 @@ async function refresh(){
     mock:   "Mock 模式（假数据）",
     local:  "本机便笺库 · 只读",
     fabric: "NotesFabric 云端 · 可读写",
+    // real 底下有多条通道，正常情况下会被上面的 GCHANNEL_LABEL 命中；
+    // 只有「已登录但还没探测完」这一瞬间会落到这里 —— 给个说明性的文案，
+    // 别让界面露出裸的 "real"（用户实测见过）。
+    real:   "微软便笺 · 通道待探测",
   };
   const glabel = (g.channel && GCHANNEL_LABEL[g.channel])
     || GMODE_LABEL[g.mode] || g.mode;

@@ -189,6 +189,9 @@ class RealGraph:
         self.last_error = ""
         self._acct_cache = ""
         self._acct_at = 0.0
+        # 上次尝试探测通道的时间（节流用）。探测本身有 self.channel 做缓存，
+        # 这个只用于"探测失败时别每 2 秒重试一次"（前端会轮询 /api/state）。
+        self._probe_at = 0.0
         # 通道："" 未探测 / "notes" = /me/notes（窄权限 ShortNotes.*）
         #                        / "mail"  = /me/mailfolders/notes/messages（Mail.Read）
         # 便笺在邮箱里就是 Notes 文件夹里的条目，所以两条路都能读到。
@@ -429,6 +432,23 @@ class RealGraph:
         left = 0
         if has_access:
             left = max(0, round((self.token.get("expires_at", 0) - time.time()) / 60))
+
+        # ★ 已登录但还没探过通道 → 主动探一次。
+        #   探测是**惰性**的（只在真正发请求时触发），而容器重启之后没人触发过，
+        #   界面就一直显示"通道：未探测"—— 而这恰恰是判断"读不读得到 2026 便笺"
+        #   的唯一依据，留着空白等于让用户瞎猜（用户实测问过这个）。
+        #   代价可控：探测结果缓存在 self.channel，成功只付一次请求；
+        #   失败也**不抛**，并节流 30 秒，免得前端每 2 秒轮询就重试一次。
+        if connected and not self.channel:
+            now = time.time()
+            if now - self._probe_at >= 30:
+                self._probe_at = now
+                try:
+                    self._detect_channel(self.ensure_token())
+                except Exception as e:
+                    if not self.last_error:
+                        self.last_error = str(e)
+
         return {
             "mode": "real",
             "connected": connected,
@@ -439,10 +459,10 @@ class RealGraph:
             "channel": self.channel,
             "channel_label": {
                 "outlook": "Outlook REST（全部便笺 · 含 2026 · 可读写）",
-                "notes": "官方便笺通道（ShortNotes 权限，可读可写）",
-                "mail": "邮箱便笺通道（Mail.Read，只读，**缺 2026**）",
-                "": "未探测",
-            }.get(self.channel, self.channel),
+                "notes": "Graph 官方便笺（ShortNotes 权限，可读可写）",
+                "mail": "Graph 邮箱便笺（Mail.Read，只读，**缺 2026**）",
+                "": "还没探测（登录后会立刻探一次）",
+            }.get(self.channel or "", self.channel),
             "error": self.last_error,
         }
 
