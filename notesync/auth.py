@@ -30,6 +30,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import threading
 import time
 from typing import Any
 
@@ -96,6 +97,12 @@ class Auth:
         self._log = log or (lambda msg, level="info": None)
         # 登录失败节流：内存计数即可（重启归零无所谓，重启本身要宿主机权限）
         self._fails: dict[str, list[float]] = {}
+        # ★ 会话表是"读-改-写"的：`s = self._sessions(); s[k] = ...; _save_sessions(s)`。
+        #   不加锁的话，两个并发登录会各自读到同一份快照，
+        #   后写的把先写的整个盖掉 —— 表现就是**另一个设备的登录会莫名失效**。
+        #   server 是 ThreadingHTTPServer，并发是常态。
+        self._lock = threading.Lock()
+        self._last_why = ""
 
     # ---------------------------------------------------------- 密码
 
@@ -161,10 +168,11 @@ class Auth:
         放 cookie 里等于多一个客户端可伪造的字段，还得额外校验一致性。
         """
         token = secrets.token_urlsafe(32)
-        s = self._sessions()
-        s[token_hash(token)] = {"exp": time.time() + SESSION_TTL,
-                                "epoch": self._epoch()}
-        self._save_sessions(s)
+        with self._lock:                 # 读-改-写必须原子，否则并发登录互相覆盖
+            s = self._sessions()
+            s[token_hash(token)] = {"exp": time.time() + SESSION_TTL,
+                                    "epoch": self._epoch()}
+            self._save_sessions(s)
         return token
 
     def validate(self, token: str | None) -> bool:
@@ -172,25 +180,51 @@ class Auth:
 
         **会话记录里的 epoch 必须等于当前 epoch** ——
         这正是"改密码/重置立刻踢掉所有旧会话"的实现方式。
+
+        失败时把**具体原因**记下来（真实归因）：
+        用户反馈过"有时会突然退出、要重新输密码"，而这条路径有三种
+        完全不同的原因（cookie 没带上 / 会话不在表里 / epoch 被吊销），
+        不区分的话只能靠猜。这里只在**原因变化时**记一条，不刷屏。
         """
         if not token:
+            self._note_why("cookie 里没有会话令牌")
             return False
         rec = self._sessions().get(token_hash(token))
         if not rec:
+            # 区分"从来没签发过"和"签发了但已过期被过滤掉"
+            raw = self.store.get_cred("auth_sessions") or {}
+            expired = token_hash(token) in (raw if isinstance(raw, dict) else {})
+            self._note_why("会话已过期（30 天）" if expired else "会话不在服务端记录里"
+                           "（可能被吊销，或本地会话表被覆盖）")
             return False
-        return int(rec.get("epoch") or 0) == self._epoch()
+        if int(rec.get("epoch") or 0) != self._epoch():
+            self._note_why("会话的 epoch 与服务端不一致（改过密码/重置过）")
+            return False
+        return True
+
+    def _note_why(self, why: str) -> None:
+        """只在原因变化时记一次 —— 前端每 2 秒轮询，不去重会刷爆日志。"""
+        if getattr(self, "_last_why", "") == why:
+            return
+        self._last_why = why
+        try:
+            self._log(f"未登录：{why}", "warn")
+        except Exception:
+            pass
 
     def logout(self, token: str | None) -> None:
         if not token:
             return
-        s = self._sessions()
-        s.pop(token_hash(token), None)
-        self._save_sessions(s)
+        with self._lock:
+            s = self._sessions()
+            s.pop(token_hash(token), None)
+            self._save_sessions(s)
 
     def revoke_all(self) -> None:
         """吊销全部会话：清空列表 + epoch+1（双保险，防止旧表被写回）。"""
-        self.store.set_cred("auth_sessions", {})
-        self.store.set_meta("auth_epoch", str(self._epoch() + 1))
+        with self._lock:
+            self.store.set_cred("auth_sessions", {})
+            self.store.set_meta("auth_epoch", str(self._epoch() + 1))
         self._fails.clear()
 
     # ---------------------------------------------------------- 失败节流

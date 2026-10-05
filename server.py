@@ -475,7 +475,14 @@ def pair_by_content(store, engine) -> dict[str, Any]:
     或者在两边分别写过同样的东西），登录成功后列表里每条都出现两次、
     全都标着「未配对」。
 
-    做法：两侧按**内容指纹**分组，同指纹的按顺序一一配对。
+    做法：两侧按**配对指纹**（`pair_hash` —— 在 content_hash 基础上
+    额外忽略中文字符之间的空格）分组，同指纹的按顺序一一配对。
+
+    为什么不是 content_hash：实测剩下的差异就是"小米侧多了词间空格"
+    （`全屋智能旅游规划` ↔ `全屋智能 旅游规划`，相似度 0.98+），
+    中文里那通常只是输入习惯，但严格哈希会判成两条不同内容 → 永远配不上。
+    （英文里的空格仍有语义，pair_hash 只对非 ASCII 之间放宽。）
+
     - 完全不动已经配好的（link 表里已有的跳过）
     - 同指纹但**数量不等**的（比如便笺有 3 条一样的、小米只有 1 条），
       只配 min(个数) 条，多出来的留着不动 —— 硬凑会张冠李戴
@@ -485,7 +492,7 @@ def pair_by_content(store, engine) -> dict[str, Any]:
     """
     from collections import defaultdict
 
-    from notesync.textutil import content_hash
+    from notesync.textutil import content_hash, pair_hash
 
     g_all = engine.graph.list_notes()
     m_all = engine.xiaomi.list_notes()
@@ -497,11 +504,11 @@ def pair_by_content(store, engine) -> dict[str, Any]:
     g_by_hash: dict[str, list] = defaultdict(list)
     for g in g_all:
         if g.get("id") and g["id"] not in linked_g:
-            g_by_hash[content_hash(g.get("text"))].append(g)
+            g_by_hash[pair_hash(g.get("text"))].append(g)
     m_by_hash: dict[str, list] = defaultdict(list)
     for m in m_all:
         if m.get("id") and m["id"] not in linked_m:
-            m_by_hash[content_hash(m.get("text"))].append(m)
+            m_by_hash[pair_hash(m.get("text"))].append(m)
 
     paired = 0
     leftover = 0
@@ -512,8 +519,11 @@ def pair_by_content(store, engine) -> dict[str, Any]:
         n = min(len(gs), len(ms))
         for i in range(n):
             g, m = gs[i], ms[i]
+            # base_hash 仍用**严格**指纹（小米侧那份）——
+            # 于是第一次同步会判定"便笺侧改过"，把便笺内容写过去，
+            # 也就是**以便笺为准对齐**（顺便把小米侧多出来的空格抹平）。
             store.upsert_link(
-                m["id"], g["id"], h,
+                m["id"], g["id"], content_hash(m.get("text")),
                 g.get("change_key", "") or "",
                 iso_to_ms(m.get("modified_iso") or "") or 0,
             )

@@ -340,6 +340,36 @@ def content_hash(text: str | None) -> str:
     return hashlib.sha1(canon(text).encode("utf-8")).hexdigest()[:16]
 
 
+def pair_key(text: str | None) -> str:
+    """**配对专用**的宽松指纹：额外忽略**中文字符之间**的空格。
+
+    为什么要单独一层（不能直接改 content_hash）：
+      1. content_hash 是"变更检测"的判据，放宽了会把真实编辑也判成"没变"；
+      2. 实测两侧剩下的差异就是这一种 ——
+           便笺 `全屋智能旅游规划劳资关系`
+           小米 `全屋智能 旅游规划 劳资关系`
+         相似度 0.985~0.997，差异**全是词间多出来的空格**（0x20）。
+         中文里这种空格通常只是输入/分词习惯，不影响语义，
+         但对哈希来说就是"两条不同的内容"，于是永远配不上。
+
+    只对**非 ASCII 之间**放宽：英文里空格是有语义的（`a b` ≠ `ab`），
+    所以 `a b` 和 `ab` 仍然判为不同。
+    """
+    s = canon(text)
+    out: list[str] = []
+    for i, ch in enumerate(s):
+        if ch == " " and 0 < i < len(s) - 1:
+            if ord(s[i - 1]) > 127 and ord(s[i + 1]) > 127:
+                continue        # 左右都是中文 → 这个空格不参与比较
+        out.append(ch)
+    return "".join(out)
+
+
+def pair_hash(text: str | None) -> str:
+    """配对用的指纹（比 content_hash 宽松）"""
+    return hashlib.sha1(pair_key(text).encode("utf-8")).hexdigest()[:16]
+
+
 def first_line(text: str | None, limit: int = 60) -> str:
     """取第一个非空行做标题（小米笔记有 subject 字段，便笺没有）。
 
