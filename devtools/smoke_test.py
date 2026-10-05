@@ -133,6 +133,25 @@ def main() -> int:
         up = wait_port(ctx)
         ok("服务能在空目录上启动并响应", up)
         if not up:
+            # ★ 服务没起来时必须把子进程的输出打出来 ——
+            #   否则只看到一句 FAIL，完全不知道是缺依赖、端口冲突还是别的。
+            print("\n  服务没起来，子进程输出如下：")
+            try:
+                if proc and proc.poll() is not None:
+                    print(f"    （进程已退出，exit code = {proc.returncode}）")
+                out = b""
+                try:
+                    out = proc.stdout.read() or b"" if proc and proc.stdout else b""
+                except Exception:
+                    pass
+                for line in (out.decode("utf-8", "replace") or "").splitlines()[-25:]:
+                    print("    | " + line)
+                if not out:
+                    print("    （没有输出 —— 可能在 import 阶段就挂了，"
+                          "或者解释器路径不对）")
+                    print(f"    解释器: {sys.executable}")
+            except Exception as e:
+                print("    读子进程输出失败:", e)
             raise SystemExit(1)
         cfg_file = tmp / "config.json"
         ok("自动创建了 config.json", cfg_file.exists())
@@ -207,14 +226,34 @@ def main() -> int:
            r.get("ok") is not True and bool(e2), f"{dt:.1f}s -> {e2[:140]}")
 
         # ---- 6. 小米扫码不能挂住
-        print("\n[6] 小米扫码（缺 migate 或网络受限时必须快速返回）")
+        print("\n[6] 小米扫码（必须快速返回，不能把请求线程挂死）")
         r, dt = ctx.call("/api/xiaomi/qr/start", {}, timeout=40)
-        ok("扫码端点快速返回（未超时）", dt < 35, f"耗时 {dt:.1f}s -> {str(r)[:140]}")
-        ok("扫码端点给出可读的提示",
-           r.get("ok") is False and bool(r.get("error")), str(r)[:140])
+        ok("扫码端点快速返回（未超时）", dt < 35, f"耗时 {dt:.1f}s")
+        # 两种结果都算合格：装了 migate 就能拿到二维码，没装要给得出可读的提示。
+        # （不能只认"报错" —— 那样装了 migate 反而判失败。）
+        if r.get("ok") and r.get("qr_svg"):
+            ok("扫码端点返回了二维码", True, f"phase={r.get('phase')}")
+        else:
+            ok("扫码端点给出可读的提示", bool(r.get("error")), str(r)[:140])
 
-        # ---- 7. 受保护端点
-        print("\n[7] 鉴权边界")
+        # ---- 6b. 小米账号密码登录（容器里唯一能完整走通的登录方式）
+        print("\n[6b] 小米账号密码登录端点")
+        r, dt = ctx.call("/api/xiaomi/pwd/status")
+        ok("状态端点可用", "phase" in r, str(r)[:120])
+
+        r, dt = ctx.call("/api/xiaomi/pwd/login", {})
+        ok("空账号被拦下", r.get("ok") is not True and bool(r.get("error")),
+           f"{dt:.1f}s -> {str(r)[:130]}")
+
+        r, dt = ctx.call("/api/xiaomi/pwd/login", {"user": "nobody", "password": ""})
+        ok("空密码被拦下", r.get("ok") is not True and bool(r.get("error")),
+           f"{dt:.1f}s -> {str(r)[:130]}")
+
+        r, dt = ctx.call("/api/xiaomi/pwd/check", {"ticket": ""})
+        ok("空验证码被拦下", r.get("ok") is not True and bool(r.get("error")),
+           f"{dt:.1f}s -> {str(r)[:130]}")
+
+        # ---- 7. 鉴权边界
         anon = Ctx(base)
         r, _ = anon.call("/api/state")
         ok("/api/state 未登录时拒绝", r.get("need_login") is True, str(r)[:100])

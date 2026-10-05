@@ -26,7 +26,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from notesync import mi_qr
+from notesync import mi_pwd, mi_qr
 from notesync.auth import Auth, COOKIE, SESSION_TTL, check_strength
 from notesync.engine import SyncEngine, iso_to_ms
 from notesync.graph import LocalGraph, MockGraph, NotesFabricGraph, RealGraph
@@ -441,6 +441,27 @@ def build_backup(store, engine) -> dict[str, Any]:
     }
 
 
+def _finish_xiaomi_login(store, r: dict) -> dict:
+    """账号密码登录成功后的收尾：把 passToken 换成 i.mi.com 的服务 cookie 并落库。
+
+    直接复用 `mi_qr._finish` —— 扫码和账号密码两条路最终落在同一个状态上，
+    各写一份迟早会漂移（回收站字段、局部缓存这些最容易漏）。
+    """
+    pass_token = r.get("pass_token") or {}
+    if not pass_token:
+        return {"ok": False, "error": "登录返回里没有 passToken"}
+    try:
+        merged = mi_qr._finish(store, pass_token)      # noqa: SLF001
+    except Exception as e:
+        return {"ok": False, "error": f"登录成功，但换取服务凭据失败：{e}"}
+    try:
+        rebuild()      # 让 xiaomi 实例立刻用上新凭据，用户不用重启容器
+    except Exception:
+        pass
+    return {"ok": True, "account": str(merged.get("userId") or ""),
+            "message": "登录成功，凭据已保存"}
+
+
 def sync_loop():
     """后台同步循环。
 
@@ -786,6 +807,10 @@ class Handler(BaseHTTPRequestHandler):
         # 小米扫码登录：状态查询（不含二维码图，避免每 2 秒反复传 28KB）
         if path == "/api/xiaomi/qr/status":
             return self._json({"ok": True, **mi_qr.status()})
+
+        # 小米账号密码登录的进度（GET 和 POST 都收 —— 前端用 POST 保持一致）
+        if path == "/api/xiaomi/pwd/status":
+            return self._json(mi_pwd.status())
 
         # 小米文件夹：列表 + 当前选择 + 条数对比（目标文件夹内 / 全部）
         if path == "/api/xiaomi/folders":
@@ -1237,6 +1262,47 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/xiaomi/qr/cancel":
                 mi_qr.cancel()
                 return self._json({"ok": True})
+
+            # ---------------- 小米账号密码登录（容器里唯一能完整走通的登录方式）
+            #
+            # 为什么单独做这一套：扫码在容器里过不了小米的**新设备安全验证**
+            # （isSecondValidation —— 扫码那条链路根本没处理 notificationUrl），
+            # 而「浏览器登录」要弹有头浏览器，容器里没显示器。
+            # 账号密码全程都是普通 HTTPS，能把二次验证也搬到页面上：
+            #   登录 → （可能）图形验证码 → （可能）选手机/邮箱 → 发码 → 输码 → 落库
+            if path == "/api/xiaomi/pwd/login":
+                try:
+                    r = mi_pwd.login((body.get("user") or "").strip(),
+                                     body.get("password") or "",
+                                     (body.get("capt_code") or "").strip())
+                except ImportError:
+                    return self._json({"ok": False,
+                                       "error": "没装 migate，这条登录方式不可用"}, 400)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+                if r.get("ok"):
+                    return self._json(_finish_xiaomi_login(store, r))
+                return self._json(r)
+
+            if path == "/api/xiaomi/pwd/send":
+                try:
+                    r = mi_pwd.send_code(body.get("type") or "PH",
+                                         (body.get("capt_code") or "").strip())
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+                return self._json(r)
+
+            if path == "/api/xiaomi/pwd/check":
+                try:
+                    r = mi_pwd.check_code((body.get("ticket") or "").strip())
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+                if r.get("ok"):
+                    return self._json(_finish_xiaomi_login(store, r))
+                return self._json(r)
+
+            if path == "/api/xiaomi/pwd/status":
+                return self._json(mi_pwd.status())
 
             # ---------------- 小米凭据
             if path == "/api/xiaomi/cookie":

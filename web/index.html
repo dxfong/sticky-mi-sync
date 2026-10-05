@@ -1174,6 +1174,55 @@ function renderLoginBoxes(g, x, cfg){
   } else {
     const prof = x.profile || {};
     xparts.push(`
+      <!-- ★★ 账号密码登录：容器 / 服务器里**唯一能完整走通**的方式。
+           为什么它排在扫码前面：
+             · 扫码 = 新设备 → 小米要求交互式安全验证，而扫码那条链路
+               （migate 的 handle_browser_qr）根本没处理 notificationUrl，
+               拿到 cookie 就报"成功"，于是读笔记接口被 401 拒掉（实测踩过）；
+             · 「浏览器登录」要弹有头浏览器，容器里没显示器，也走不通；
+             · 账号密码 + 网页版二次验证全程都是普通 HTTPS，
+               短信/邮箱验证码就在本页面输 —— 不需要手机扫码，也不需要本机浏览器。 -->
+      <div style="border:1px solid var(--line);border-radius:9px;padding:11px;margin-bottom:11px">
+        <div class="kv" style="line-height:1.8;margin-bottom:9px">
+          <b>用小米账号密码登录</b>（容器里推荐这条路）<br>
+          全程在本页面完成，<b>包括短信 / 邮箱安全验证</b> —— 不需要手机扫码，
+          也不需要本机浏览器。
+        </div>
+        <div class="row" style="flex-wrap:wrap;gap:6px">
+          <input id="xPwUser" placeholder="小米账号（手机号 / 邮箱 / 小米ID）"
+                 style="flex:1;min-width:170px" autocomplete="username">
+          <input id="xPwPass" type="password" placeholder="密码" style="width:140px"
+                 autocomplete="current-password">
+          <button class="primary" id="xPwGo">登录</button>
+        </div>
+        <div class="kv" id="xPwMsg" style="margin-top:8px"></div>
+
+        <!-- 图形验证码（登录前 / 发短信前，小米都可能要） -->
+        <div id="xPwCaptcha" style="display:none;margin-top:9px">
+          <div class="kv">请输入图中的字符：</div>
+          <img id="xPwCaptchaImg" alt="图形验证码"
+               style="margin:7px 0;border-radius:6px;background:#fff;max-width:150px;cursor:pointer"
+               title="点一下换一张">
+          <div class="row" style="gap:6px">
+            <input id="xPwCaptchaCode" placeholder="图形验证码" style="width:130px">
+            <button class="primary" id="xPwCaptchaGo">提交并继续</button>
+          </div>
+        </div>
+
+        <!-- 二次验证 -->
+        <div id="xPwVerify" style="display:none;margin-top:9px">
+          <div class="kv" id="xPwVerifyHint" style="line-height:1.8"></div>
+          <div class="row" id="xPwMethods" style="flex-wrap:wrap;gap:6px;margin-top:7px"></div>
+          <div class="row" id="xPwCodeRow" style="display:none;gap:6px;margin-top:7px">
+            <input id="xPwCode" placeholder="验证码" style="width:130px"
+                   inputmode="numeric" autocomplete="one-time-code">
+            <button class="primary" id="xPwCodeGo">提交</button>
+            <button id="xPwResend">重新发送</button>
+          </div>
+        </div>
+      </div>`);
+
+    xparts.push(`
       <div class="kv" style="margin-bottom:8px">
         <b>① 点下面的「浏览器登录」</b> —— 会弹出一个窗口，在里面登录
         <code>i.mi.com</code>（可以扫码；如果要求安全验证，就在那个窗口里做完）。
@@ -1187,13 +1236,17 @@ function renderLoginBoxes(g, x, cfg){
         <!-- ★ 扫码登录入口。后端 /api/xiaomi/qr/* 一直是好的，
              但界面上一直没有按钮能触发它（只绑了 onclick，没人派发）——
              直到准备 docker 部署才暴露：容器里没有浏览器，
-             「浏览器登录」必然失败，而扫码是**唯一**可行的登录方式。 -->
+             「浏览器登录」必然失败。
+
+             ⚠ 但它**在容器里也过不了二次验证**（扫码 = 新设备），
+             所以容器环境请优先用上面的「账号密码登录」。 -->
         <button class="primary" id="xQrStart"
-                title="用小米手机扫码登录 —— 不需要本机浏览器。
-服务器 / 容器（docker）环境下请用这个">扫码登录（推荐）</button>
+                title="用小米手机扫码登录。⚠ 容器里扫码会被当成新设备，
+小米会要求安全验证，而这条链路处理不了 —— 容器里请优先用上面的账号密码登录">
+          扫码登录（本机）</button>
         <button id="xBrowserLogin"
                 title="在本机弹出浏览器登录 i.mi.com —— 需要本机装有 Chrome/Edge。
-容器里没有浏览器，这条路走不通，请改用扫码登录">浏览器登录（本机）</button>
+容器里没有浏览器，这条路走不通">浏览器登录（本机）</button>
         <button id="xBrowserRefresh" title="profile 里已有登录态时用">静默续期</button>
       </div>
       <div class="kv" id="xQrMsg" style="margin-bottom:8px"></div>
@@ -1245,6 +1298,114 @@ function renderLoginBoxes(g, x, cfg){
   xbox.innerHTML = xparts.join("");
   const xToReal = $("xToReal");
   if (xToReal) xToReal.onclick = () => switchMode("xiaomi", "real");
+  // ── 小米账号密码登录（含图形验证码 + 二次验证）
+  //
+  // 图形验证码会出现在**两个不同的时机**（登录时 / 发短信前），
+  // 所以用 captchaStage 记住"提交这张图之后该继续做什么"。
+  // 记错的话会把短信验证码当成登录验证码提交，得到一堆看不懂的报错。
+  const xPwGo = $("xPwGo");
+  if (xPwGo) {
+    const pwMsg = $("xPwMsg");
+    let captchaStage = "login";        // login | send
+    let pendingType = "PH";            // 发短信时选的方式
+
+    const showCaptcha = (b64, stage) => {
+      captchaStage = stage;
+      $("xPwCaptchaImg").src = "data:image/png;base64," + (b64 || "");
+      $("xPwCaptchaCode").value = "";
+      $("xPwCaptcha").style.display = "";
+    };
+    const hideCaptcha = () => { $("xPwCaptcha").style.display = "none"; };
+
+    const renderVerify = (r) => {
+      $("xPwVerifyHint").innerHTML =
+        "小米要求<b>安全验证</b>（新设备/异地登录会触发）。选一种方式收验证码：";
+      const m = $("xPwMethods");
+      m.innerHTML = "";
+      m.style.display = "";
+      (r.methods || []).forEach(mt => {
+        const b = document.createElement("button");
+        b.textContent = "发送到" + mt.label;
+        b.onclick = () => sendCode(mt.type);
+        m.appendChild(b);
+      });
+      $("xPwCodeRow").style.display = "none";
+      $("xPwVerify").style.display = "";
+    };
+
+    const sendCode = async (type, captCode) => {
+      pendingType = type;
+      pwMsg.textContent = "正在发送验证码…";
+      let s;
+      try { s = await api("/api/xiaomi/pwd/send", {type: type, capt_code: captCode || ""}); }
+      catch (e) { s = {ok: false, error: String(e)}; }
+      if (s.need_captcha) {
+        showCaptcha(s.captcha_b64, "send");
+        pwMsg.textContent = "发验证码前需要图形验证码";
+        return;
+      }
+      if (!s.ok) { pwMsg.textContent = "失败：" + (s.error || ""); return; }
+      hideCaptcha();
+      pwMsg.textContent = "";
+      $("xPwVerifyHint").innerHTML =
+        `验证码已发到<b>${esc(s.to || "手机/邮箱")}</b>，请查看并填入。`;
+      $("xPwMethods").style.display = "none";
+      $("xPwCodeRow").style.display = "";
+    };
+
+    const doLogin = async (captCode) => {
+      const user = $("xPwUser").value.trim();
+      const pass = $("xPwPass").value;
+      if (!user || !pass) { pwMsg.textContent = "账号和密码都要填"; return; }
+      pwMsg.textContent = "登录中…（会连小米服务器，稍等几秒）";
+      xPwGo.disabled = true;
+      let r;
+      try { r = await api("/api/xiaomi/pwd/login",
+                          {user: user, password: pass, capt_code: captCode || ""}); }
+      catch (e) { r = {ok: false, error: String(e)}; }
+      xPwGo.disabled = false;
+      if (r.ok) {
+        hideCaptcha();
+        pwMsg.textContent = r.message || "登录成功";
+        $("xLoginBox").dataset.sig = ""; refresh(); return;
+      }
+      if (r.need_captcha) { showCaptcha(r.captcha_b64, "login"); pwMsg.textContent = "需要图形验证码"; return; }
+      if (r.need_verify) { hideCaptcha(); pwMsg.textContent = ""; renderVerify(r); return; }
+      hideCaptcha();
+      pwMsg.textContent = "失败：" + (r.error || "未知原因");
+    };
+
+    xPwGo.onclick = () => doLogin("");
+    $("xPwCaptchaImg").onclick = () => {          // 点图换一张
+      if (captchaStage === "send") sendCode(pendingType, "");
+      else doLogin("");
+    };
+    $("xPwCaptchaGo").onclick = () => {
+      const code = $("xPwCaptchaCode").value.trim();
+      if (!code) { pwMsg.textContent = "请填图形验证码"; return; }
+      if (captchaStage === "send") sendCode(pendingType, code);
+      else doLogin(code);
+    };
+    $("xPwCodeGo").onclick = async () => {
+      const t = $("xPwCode").value.trim();
+      if (!t) { pwMsg.textContent = "请填验证码"; return; }
+      pwMsg.textContent = "正在验证…";
+      let r;
+      try { r = await api("/api/xiaomi/pwd/check", {ticket: t}); }
+      catch (e) { r = {ok: false, error: String(e)}; }
+      if (r.ok) {
+        pwMsg.textContent = r.message || "登录成功";
+        $("xLoginBox").dataset.sig = ""; refresh(); return;
+      }
+      pwMsg.textContent = "失败：" + (r.error || "验证码不对");
+    };
+    $("xPwResend").onclick = () => {
+      $("xPwCodeRow").style.display = "none";
+      $("xPwMethods").style.display = "";
+      pwMsg.textContent = "请重新选一种方式发送";
+    };
+  }
+
   const xQrStart = $("xQrStart");
   if (xQrStart) xQrStart.onclick = startQrLogin;
   const xBrowserRefresh = $("xBrowserRefresh");

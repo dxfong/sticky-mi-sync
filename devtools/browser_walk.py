@@ -129,6 +129,23 @@ def main() -> int:
         print(f"        微软卡片: {gtext[:70].replace(chr(10),' ')}")
         print(f"        小米卡片: {xtext[:70].replace(chr(10),' ')}")
 
+        # ---- 4b. 小米账号密码登录区（容器里唯一能完整走通的登录方式）
+        print("\n[4b] 小米账号密码登录区")
+        for sel, label in [("#xPwUser", "账号输入框"), ("#xPwPass", "密码输入框"),
+                           ("#xPwGo", "登录按钮"), ("#xPwMsg", "提示区")]:
+            ok(f"有{label}", page.locator(sel).count() > 0, sel)
+        ok("默认隐藏图形验证码区", not page.locator("#xPwCaptcha").is_visible())
+        ok("默认隐藏二次验证区", not page.locator("#xPwVerify").is_visible())
+        ok("密码框是 password 类型",
+           page.locator("#xPwPass").get_attribute("type") == "password")
+
+        # 空提交应给出提示而不是静默
+        page.locator("#xPwGo").click()
+        page.wait_for_timeout(500)
+        m = page.inner_text("#xPwMsg")
+        ok("空提交给出提示", bool(m.strip()), m[:80])
+        page.screenshot(path=str(SHOTS / "04b-小米密码登录区.png"))
+
         # ---- 5. 列表区
         print("\n[5] 记录列表")
         rows = page.locator("#mergedList li")
