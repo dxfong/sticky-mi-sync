@@ -303,7 +303,20 @@ def note_html(text: str | None) -> str:
 
 
 def canon(text: str | None) -> str:
-    """规范化。两侧比较和哈希都只认这个结果"""
+    """规范化。两侧比较和哈希都只认这个结果。
+
+    ★ 为什么最后要把**所有空白序列折叠成单个空格**：
+    小米侧存笔记时会**规范化空白** —— 实测（拿两侧真实数据逐条对比出来的）：
+      · 连续换行被压扁：便笺 `a\\n\\n再次` ↔ 小米 `a\\n再次`
+                       便笺 `a\\n\\n\\n\\n个体` ↔ 小米 `a\\n个体`
+      · 空格和换行互转：便笺 `A 126 密码` ↔ 小米 `A \\n126 密码 `
+    结果是同一篇笔记在两侧的 `content_hash` 不同 → 配不上对、
+    而且每轮同步还会互相认为"对方改了"，来回覆盖。
+
+    折掉空白之后这些差异就消失了，而**换行结构本来也不该用来判断
+    "这是不是同一条笔记"**。注意这只影响比较与哈希 ——
+    真正写入另一端时用的始终是**原始文本**，不会把换行丢掉。
+    """
     t = strip_block_markers(text)
     t = t.replace("\r\n", "\n").replace("\r", "\n")
     out: list[str] = []
@@ -317,7 +330,9 @@ def canon(text: str | None) -> str:
         out.pop(0)
     while out and not out[-1]:
         out.pop()
-    return "\n".join(out).strip()
+    joined = "\n".join(out).strip()
+    # 所有空白序列（换行、连续空格、制表）→ 单个空格
+    return " ".join(joined.split())
 
 
 def content_hash(text: str | None) -> str:
@@ -326,8 +341,13 @@ def content_hash(text: str | None) -> str:
 
 
 def first_line(text: str | None, limit: int = 60) -> str:
-    """取首行做标题（小米笔记有 subject 字段，便笺没有）"""
-    for line in canon(text).split("\n"):
+    """取第一个非空行做标题（小米笔记有 subject 字段，便笺没有）。
+
+    ⚠ 这里**故意不走 canon** —— canon 现在会把所有空白折叠掉（见上面的说明），
+    用它就取不到"第一行"了，会把整篇内容的前 60 个字当成标题。
+    """
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    for line in t.split("\n"):
         if line.strip():
             return line.strip()[:limit]
     return ""

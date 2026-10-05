@@ -163,8 +163,10 @@ def profile_life(profile: str | Path) -> dict:
         "conclusion": "",
     }
     if not profile.is_dir():
-        out["conclusion"] = ("没有浏览器 profile —— 续期只能走 passToken 换证那条路，"
-                             "而那条路可能被验证码拦住。建议先跑一次 browser-login.bat。")
+        out["conclusion"] = ("这个环境里没有浏览器 profile（容器 / 服务器都是这样）——"
+                             "凭据无法自动续期，因为 passToken 换证可能被小米的"
+                             "安全验证拦住。**凭据过期后回到页面用「账号密码登录」"
+                             "重新登一次即可**，一分钟的事。")
         return out
 
     db = cookie_db(profile)
@@ -198,8 +200,9 @@ def profile_life(profile: str | Path) -> dict:
     if not ls["has_login"]:
         out["conclusion"] = (
             "profile 里**没有** i.mi.com 的登录态（localStorage 里找不到痕迹）"
-            "—— 静默续期不可用。需要跑一次 browser-login.bat 登录，"
-            "只需一次，之后就能一直静默续期。"
+            "—— 静默续期不可用。凭据过期后回页面用「账号密码登录」重登一次即可；"
+            "若这台机器本身有浏览器，也可以跑 `python -m notesync.browser_auth` "
+            "建立持久登录态（那样以后就不用再登了）。"
         )
     elif out["device_days_left"] > 0:
         out["conclusion"] = (

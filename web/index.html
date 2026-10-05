@@ -1149,7 +1149,10 @@ function renderLoginBoxes(g, x, cfg){
            ${prof.device_days_left ? `（可信设备还有 ${prof.device_days_left} 天）` : ""}
          </div>`
       : `<div class="kv" style="margin-top:4px;color:var(--warn)">
-           ⚠️ 还没建立持久登录态 —— 凭据一过期就得重新登录
+           ⚠️ 凭据当前有效，但**不能自动续期** ——
+           容器 / 服务器里没有浏览器 profile，passToken 换证又可能被小米的安全验证拦下。<br>
+           <span style="color:var(--dim)">过期后（一般几天到几周）回到这里，
+           用上面的<b>账号密码登录</b>重新登一次就行，一分钟的事。</span>
          </div>`;
 
     xparts.push(`<div class="row" style="align-items:center">

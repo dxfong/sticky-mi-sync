@@ -354,9 +354,10 @@ class RealXiaomi:
                 return
         miss = [k for k in ("serviceToken", "userId") if not c.get(k)]
         raise RuntimeError(
-            f"小米凭据不完整（缺 {'、'.join(miss)}）—— "
-            f"已尝试从浏览器 profile 静默补齐但没成功。"
-            f"请用 browser-login.bat 重新登录一次")
+            f"小米凭据不完整（缺 {'、'.join(miss)}）。"
+            f"请到页面「账号与登录 → 小米笔记」卡片里，"
+            f"用最上方的**账号密码登录**重新登录一次 —— "
+            f"全程在这个页面完成（含短信/邮箱验证码），不需要本机浏览器。")
 
     def _try_silent_reaquire(self) -> bool:
         """凭据不完整时的一次静默补齐（带 60 秒节流，避免反复起浏览器）。"""
@@ -441,15 +442,17 @@ class RealXiaomi:
         root = Path(__file__).resolve().parent.parent
         profile = Path(self.store.data_dir) / "browser_profile"
         if not profile.exists():
-            self.last_error = "还没有浏览器 profile（先用 browser-login.bat 登录一次）"
+            self.last_error = ("还没有浏览器 profile —— 这条路走不通。"
+                               "（容器/服务器里本来就没有浏览器，属正常；"
+                               "凭据过期后用页面上的「账号密码登录」重登即可）")
             return False
 
         from .browser_auth import find_python_with_playwright
         exe = find_python_with_playwright()
         if not exe:
             self.last_error = ("没找到装了 playwright 的 python —— 静默续期不可用。"
-                               "在能跑 playwright 的解释器里 pip install playwright，"
-                               "或直接用 browser-login.bat 重新登录。")
+                               "（容器里本来就没有，属正常；凭据过期后用页面上的"
+                               "「账号密码登录」重登即可）")
             return False
 
         try:
@@ -500,7 +503,11 @@ class RealXiaomi:
         —— 实测把本来能用的登录态搅成了半空（缺 serviceToken）。
         """
         if self._refreshing:
-            self.last_error = "已有一次凭据续期在进行中，跳过这次"
+            # ★ 不要写进 last_error —— 这**不是故障**，只是"另一次续期正在进行，
+            #   这一轮不需要重复做"。写进去会被界面和日志当成错误显示
+            #   （用户实测看到过「尝试自动补齐失败：已有一次凭据续期在进行中」，
+            #    看起来像坏了，其实下一轮就正常）。
+            self.store.log("另一次凭据续期正在进行，这一轮跳过（正常现象）", "info")
             return False
         self._refreshing = True
         try:
@@ -548,7 +555,11 @@ class RealXiaomi:
     def _refresh_token(self) -> bool:
         """凭据失效时续期的**入口**（带全局防重入）。见 `_refreshing` 的说明。"""
         if self._refreshing:
-            self.last_error = "已有一次凭据续期在进行中，跳过这次"
+            # ★ 不要写进 last_error —— 这**不是故障**，只是"另一次续期正在进行，
+            #   这一轮不需要重复做"。写进去会被界面和日志当成错误显示
+            #   （用户实测看到过「尝试自动补齐失败：已有一次凭据续期在进行中」，
+            #    看起来像坏了，其实下一轮就正常）。
+            self.store.log("另一次凭据续期正在进行，这一轮跳过（正常现象）", "info")
             return False
         self._refreshing = True
         try:
@@ -591,7 +602,7 @@ class RealXiaomi:
             if try_candidate("浏览器 profile", self._refresh_from_browser):
                 return True
         else:
-            errors.append("浏览器 profile：还没跑过 browser-login.bat")
+            errors.append("浏览器 profile：没有（容器/服务器里属正常）")
 
         pt = self.store.get_cred("xiaomi_pass_token")
         if pt:
