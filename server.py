@@ -462,6 +462,71 @@ def _finish_xiaomi_login(store, r: dict) -> dict:
             "message": "登录成功，凭据已保存"}
 
 
+def pair_by_content(store, engine) -> dict[str, Any]:
+    """把两侧**内容相同**的未配对笔记关联起来（一次性整理）。
+
+    为什么需要它
+    ------------
+    引擎的首次配对策略只有两种：「把便笺推过去」和「两边都收」——
+    **都会在小米侧重复一遍**。它没有"两侧已经有一模一样的内容，
+    那就把它们认成同一条"这个动作。
+
+    而现实中很常见：用户两边各自已经有数据（以前手动同步过、
+    或者在两边分别写过同样的东西），登录成功后列表里每条都出现两次、
+    全都标着「未配对」。
+
+    做法：两侧按**内容指纹**分组，同指纹的按顺序一一配对。
+    - 完全不动已经配好的（link 表里已有的跳过）
+    - 同指纹但**数量不等**的（比如便笺有 3 条一样的、小米只有 1 条），
+      只配 min(个数) 条，多出来的留着不动 —— 硬凑会张冠李戴
+    - 内容只在一边的，保持未配对（走正常的新建/推送流程）
+
+    这是**纯配对**操作：不改任何一侧的正文、不新建、不删除。
+    """
+    from collections import defaultdict
+
+    from notesync.textutil import content_hash
+
+    g_all = engine.graph.list_notes()
+    m_all = engine.xiaomi.list_notes()
+
+    links = store.all_links()
+    linked_g = {l["graph_id"] for l in links if l.get("graph_id")}
+    linked_m = {l["mi_id"] for l in links if l.get("mi_id")}
+
+    g_by_hash: dict[str, list] = defaultdict(list)
+    for g in g_all:
+        if g.get("id") and g["id"] not in linked_g:
+            g_by_hash[content_hash(g.get("text"))].append(g)
+    m_by_hash: dict[str, list] = defaultdict(list)
+    for m in m_all:
+        if m.get("id") and m["id"] not in linked_m:
+            m_by_hash[content_hash(m.get("text"))].append(m)
+
+    paired = 0
+    leftover = 0
+    for h, gs in g_by_hash.items():
+        ms = m_by_hash.get(h) or []
+        if not ms:
+            continue
+        n = min(len(gs), len(ms))
+        for i in range(n):
+            g, m = gs[i], ms[i]
+            store.upsert_link(
+                m["id"], g["id"], h,
+                g.get("change_key", "") or "",
+                iso_to_ms(m.get("modified_iso") or "") or 0,
+            )
+            paired += 1
+        leftover += abs(len(gs) - len(ms))
+
+    if paired:
+        store.log(f"按内容配对：新增 {paired} 条映射"
+                  + (f"，另有 {leftover} 条因两侧数量不等未配" if leftover else ""))
+    return {"ok": True, "paired": paired, "leftover": leftover,
+            "graph_total": len(g_all), "xiaomi_total": len(m_all)}
+
+
 def sync_loop():
     """后台同步循环。
 
@@ -909,6 +974,26 @@ class Handler(BaseHTTPRequestHandler):
                           "info" if ok_n == len(keys) else "warn")
                 return self._json({"ok": True, "total": len(keys),
                                    "succeeded": ok_n, "results": res})
+
+            if path == "/api/pair-by-content":
+                # 按内容给两侧已有的笔记建立映射（一次性整理）。
+                # 纯配对：不改正文、不新建、不删除。
+                if getattr(engine, "busy", False):
+                    return self._json({"ok": False,
+                                       "error": "正在同步中，等这一轮跑完再试"}, 409)
+                engine.busy = True
+                try:
+                    r = pair_by_content(store, engine)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+                finally:
+                    engine.busy = False
+                # 配对改了映射关系 —— 列表必须重拉一次，否则界面还是旧的（每条两份）
+                try:
+                    engine.fetch_only(source="manual")
+                except Exception:
+                    pass
+                return self._json(r)
 
             if path == "/api/sync/selected":
                 # 「同步选中」：把点名的几条对齐成两侧一致。

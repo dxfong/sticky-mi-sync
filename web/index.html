@@ -192,6 +192,12 @@
       <span class="kv" id="readyBox"></span>
       <button id="btnAcct" title="账号与登录状态">账号与登录 ▾</button>
       <button id="btnFetch">只读拉取两端列表</button>
+      <!-- 两侧各自已有数据时，登录后列表里每条会出现两次、全标「未配对」——
+           引擎的首次配对策略只有「推过去」和「两边都收」，都会重复，
+           缺一个「两侧已经一样，认成同一条」的动作。这个按钮补的就是它。 -->
+      <button id="btnPair"
+              title="把两侧**内容相同**的笔记关联起来。适用于「以前两边各自有数据，登录后列表里每条都出现两次」。
+纯配对操作：不改正文、不新建、不删除。">按内容配对</button>
       <button id="btnAuto" style="font-size:14px;padding:6px 14px">自动同步：关</button>
     </div>
   </div>
@@ -1686,6 +1692,32 @@ $("btnFetch").onclick = async () => {
   refresh();
 };
 // （原「预演一次」按钮已移除 —— 预演仍有入口：设置里的「全局预演模式」勾选框。）
+
+// 按内容配对：把两侧**内容相同**的笔记关联起来（一次性整理）。
+// 典型场景：以前两边各自有数据，登录成功后列表里每条都出现两次、全标「未配对」。
+$("btnPair").onclick = async () => {
+  const btn = $("btnPair");
+  if (!confirm("把两侧内容相同的笔记关联起来？\n\n会做：给内容一致的记录建立映射\n"
+             + "不会做：改正文、新建、删除\n\n"
+             + "内容只在一边的、或者同内容但两侧数量不一样多出来的，都会原样留着。"))
+    return;
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "配对中…";
+  let r;
+  try { r = await api("/api/pair-by-content", {}); }
+  catch (e) { r = {ok: false, error: "请求失败：" + ((e && e.message) || e)}; }
+  btn.disabled = false;
+  btn.textContent = old;
+  if (r.ok) {
+    alert(`已配对 ${r.paired} 条`
+          + (r.leftover ? `\n另有 ${r.leftover} 条：两侧同内容但数量不等，未配对（留着不动）` : "")
+          + `\n\n便笺 ${r.graph_total} 条 / 小米 ${r.xiaomi_total} 条`);
+    refresh();
+  } else {
+    alert("配对失败：" + (r.error || "未知原因"));
+  }
+};
 
 // 中止当前同步。
 // **不是"立即掐断"** —— 后端会在"当前这条处理完、下一条开始前"停下，

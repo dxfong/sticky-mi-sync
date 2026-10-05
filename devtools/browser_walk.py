@@ -155,6 +155,13 @@ def main() -> int:
         rc = page.inner_text("#rowCount") if page.locator("#rowCount").count() else ""
         print(f"        行数标签: {rc.strip()}")
 
+        # ---- 5b. 「按内容配对」按钮（两侧各自已有数据时的一次性整理）
+        print("\n[5b] 按内容配对按钮")
+        ok("按钮存在", page.locator("#btnPair").count() > 0)
+        ok("按钮可点", page.locator("#btnPair").is_enabled())
+        tip = page.locator("#btnPair").get_attribute("title") or ""
+        ok("有说明性提示", "未配对" in tip or "内容相同" in tip, tip[:70])
+
         # ---- 6. 设置区
         print("\n[6] 设置区")
         ok("设置默认收起", not page.locator("#cfgBox").is_visible())
