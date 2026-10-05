@@ -262,8 +262,21 @@ class SyncEngine:
             elif xst.get("cred_state") == "expired":
                 # "有 cookie 字段"和"凭据真能用"是两件事。失效了就必须拦下来，
                 # 否则开自动同步 = 每 5 秒失败一次。
-                blockers.append("小米凭据已失效 —— 请先静默续期，"
-                                "或点「浏览器登录」重新登录一次")
+                #
+                # ★ 这里**不能**再引导用户点「浏览器登录」——
+                #   那个按钮要弹有头浏览器（Windows 专有），容器里根本用不了。
+                #   而且小米对**新设备**（扫码 = 新设备）会要求交互式安全验证
+                #   （响应里的 isSecondValidation: true，绕不过去），
+                #   所以容器里扫码也过不了这一关。正确路径是：
+                #   在**有浏览器的机器**上完成一次登录（顺手把安全验证做掉），
+                #   再把凭据搬过来 —— 那台机器就成了"可信设备"。
+                blockers.append(
+                    "小米凭据已失效 —— 请在**有浏览器的电脑**上跑一次 "
+                    "`python -m notesync.browser_auth`（会弹窗口，"
+                    "把登录和任何安全验证做完），然后 "
+                    "`python -m notesync.export_creds` 导出，"
+                    "把小米那一段粘到本页的小米卡片里。"
+                    "（容器里扫码会被当成「新设备」，小米必然要求安全验证，过不去。）")
             elif not str(self.store.cfg["xiaomi"].get("folder_id") or "").strip():
                 blockers.append("未指定小米笔记的同步文件夹")
         except Exception as e:

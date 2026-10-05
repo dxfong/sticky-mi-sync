@@ -494,17 +494,28 @@ async function refresh(){
 
   dot($("gDot"), g.connected); dot($("xDot"), x.connected);
   renderAcct(g, x);       // 「账号与登录」面板：两端正常就收起，任一端掉线自动弹出
-  // 微软侧四种模式要分清楚 —— 它们能力差别很大，笼统写"真实连接"会误导：
-  //   fabric 云端全量可读写（正确方案）
-  //   real   走 Graph，缺 2026 年的便笺
-  //   local  只有本机能读，容器里没有
+  // ★ 标签必须**优先看 channel，而不是只看 mode**。
+  //   `real` 这个 mode 底下其实有两条能力差别很大的通道：
+  //     outlook → Outlook REST，**全部便笺（含 2026）** ← 推荐
+  //     notes   → Graph /me/notes（个人账号上根本不存在，会直接报错）
+  //     mail    → Graph 邮箱便笺文件夹，**只有 2020–2025，缺 2026**
+  //   之前只按 mode 渲染，于是走了 outlook 也显示"缺 2026" —— 与实际不符，
+  //   用户实测发现并指出过（卡片里明明写着"含 2026"）。
+  const GCHANNEL_LABEL = {
+    outlook: "Outlook REST · 全部便笺（含 2026）",
+    notes:   "Graph 官方便笺（ShortNotes）",
+    mail:    "Graph 邮箱便笺 · 缺 2026",
+  };
   const GMODE_LABEL = {
     mock:   "Mock 模式（假数据）",
-    real:   "Graph · 缺 2026 便笺",
     local:  "本机便笺库 · 只读",
     fabric: "NotesFabric 云端 · 可读写",
   };
-  $("gMode").textContent = GMODE_LABEL[g.mode] || g.mode;
+  const glabel = (g.channel && GCHANNEL_LABEL[g.channel])
+    || GMODE_LABEL[g.mode] || g.mode;
+  $("gMode").textContent = glabel;
+  // 缺 2026 的那条通道单独给出警示色（避免用户以为数据是全的）
+  $("gMode").style.color = (g.channel === "mail") ? "var(--warn)" : "";
   $("xMode").textContent = x.mode === "mock" ? "Mock 模式" : "真实连接";
   $("gAcct").textContent = g.account ? "· " + g.account : (g.configured===false ? "· 未配置 client_id" : "");
   $("xAcct").textContent = x.account ? "· " + x.account : "";
