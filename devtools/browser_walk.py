@@ -156,11 +156,13 @@ def main() -> int:
         print(f"        行数标签: {rc.strip()}")
 
         # ---- 5b. 「按内容配对」按钮（两侧各自已有数据时的一次性整理）
-        print("\n[5b] 按内容配对按钮")
-        ok("按钮存在", page.locator("#btnPair").count() > 0)
-        ok("按钮可点", page.locator("#btnPair").is_enabled())
+        print("\n[5b] 配对相关按钮")
+        ok("按内容配对按钮存在", page.locator("#btnPair").count() > 0)
         tip = page.locator("#btnPair").get_attribute("title") or ""
-        ok("有说明性提示", "未配对" in tip or "内容相同" in tip, tip[:70])
+        ok("按内容配对有说明性提示", "未配对" in tip or "内容相同" in tip, tip[:70])
+        ok("配对选中按钮存在", page.locator("#btnPairPicked").count() > 0)
+        tip2 = page.locator("#btnPairPicked").get_attribute("title") or ""
+        ok("配对选中提示了「1 条便笺 + 1 条小米」", "1 条便笺" in tip2, tip2[:70])
 
         # ---- 6. 设置区
         print("\n[6] 设置区")

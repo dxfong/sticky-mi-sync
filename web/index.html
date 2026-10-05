@@ -280,6 +280,14 @@
       <span>已选 <b id="pickCount">0</b> 条</span>
       <button id="btnDelPicked" title="把选中的记录移入回收站（两端同时删，可在回收站恢复）">删除选中</button>
       <button id="btnSyncPicked" title="把选中的记录同步成两侧一致：一侧缺就补建到另一侧；两侧内容不同则以**最后修改的那一侧**为准覆盖另一侧">同步选中</button>
+      <!-- 手动配对：「按内容配对」只认内容完全一致的（规范化空白之后）。
+           总有一些条两侧内容**确实不同**（词间空格、多一个标点），
+           那种不能自动配 —— 配错会把两条本来不同的笔记关联起来、
+           之后同步互相覆盖。所以留这个手动口子：勾 1 条便笺 + 1 条小米。 -->
+      <button id="btnPairPicked"
+              title="把勾选的**1 条便笺 + 1 条小米**关联成同一条记录。
+用于「按内容配对」没配上的那些（两侧内容有实质差异、但你知道它们其实是同一条）。
+下次同步会以便笺为准把两侧对齐。">配对选中</button>
       <span class="kv" id="pickHint"></span>
       <span style="flex:1"></span>
       <button id="btnBackup" title="全量备份：两端全部记录（含正文与时间字段）+ 配对状态 + 配置。**不含任何凭据**。会全量重拉两端，约 20 秒">备份</button>
@@ -1965,6 +1973,35 @@ $("btnSyncPicked").onclick = async () => {
       (x.ok ? "· " + (x.actions || []).join("；") : "· 失败：" + x.error));
     if (lines.length) alert(`同步选中（成功 ${r.succeeded}/${r.total}）：\n\n` + lines.join("\n"));
     toast(`同步选中完成：${r.succeeded}/${r.total} 条`, "ok");
+  }
+  refresh();
+};
+
+// 配对选中：手动把 1 条便笺 + 1 条小米关联起来。
+// 专门处理「按内容配对」配不上的那些 —— 两侧内容有实质差异（词间空格、
+// 多一个标点），机器不敢自动配（配错会让两条不同笔记互相覆盖），由人来确认。
+$("btnPairPicked").onclick = async () => {
+  const keys = Array.from(picked);
+  const gk = keys.filter(k => k.startsWith("g:"));
+  const mk = keys.filter(k => k.startsWith("m:"));
+  if (gk.length !== 1 || mk.length !== 1) {
+    toast(`请恰好勾选 1 条便笺 + 1 条小米笔记` +
+          `（现在勾了便笺 ${gk.length} 条、小米 ${mk.length} 条）`, "err");
+    return;
+  }
+  const b = $("btnPairPicked");
+  b.disabled = true;
+  const old = b.textContent;
+  b.textContent = "配对中…";
+  let r;
+  try { r = await api("/api/pair-selected", {keys}); }
+  catch (err) { r = {ok: false, error: (err && err.message) || String(err)}; }
+  b.disabled = false;
+  b.textContent = old;
+  if (r && r.ok) {
+    toast("已配对 —— 下次同步会把两侧内容对齐（以便笺为准）", "ok");
+  } else {
+    toast("配对失败：" + ((r && r.error) || "未知原因"), "err");
   }
   refresh();
 };

@@ -527,6 +527,45 @@ def pair_by_content(store, engine) -> dict[str, Any]:
             "graph_total": len(g_all), "xiaomi_total": len(m_all)}
 
 
+def pair_selected(store, engine, keys: list[str]) -> dict[str, Any]:
+    """把**手动勾选**的一条便笺 + 一条小米笔记关联起来。
+
+    为什么需要它：「按内容配对」只能认**内容完全一致**的（规范化空白之后）。
+    但总有一些条两侧内容**确实不同**（实测剩 42 条，差异是词间空格、
+    多一个标点这种"实质差异"）—— 那种不能自动配，否则可能把两条**本来不同**
+    的笔记错误关联，之后同步会互相覆盖。所以留一个手动口子。
+
+    只接受**恰好 1 条便笺 + 1 条小米**：批量按顺序两两配对看着省事，
+    但顺序一错就全错，而且配错了要一条条解，代价比多点几次大得多。
+    """
+    from notesync.textutil import content_hash
+
+    gids = [k[2:] for k in keys if k.startswith("g:")]
+    mids = [k[2:] for k in keys if k.startswith("m:")]
+    if len(gids) != 1 or len(mids) != 1:
+        return {"ok": False,
+                "error": f"请恰好勾选 1 条便笺 + 1 条小米笔记"
+                         f"（现在勾了便笺 {len(gids)} 条、小米 {len(mids)} 条）"}
+    gid, mid = gids[0], mids[0]
+
+    notes = getattr(engine, "last_notes", {}) or {}
+    g = next((n for n in (notes.get("graph") or []) if str(n.get("id")) == gid), None)
+    m = next((n for n in (notes.get("xiaomi") or []) if str(n.get("id")) == mid), None)
+    if not g or not m:
+        return {"ok": False, "error": "找不到这两条 —— 列表可能已过期，刷新一次再试"}
+
+    # ★ base_hash 用**小米侧**的指纹。
+    #   两侧内容本来就不同（不然"按内容配对"就配上了），第一次同步必然要挑一边。
+    #   用它 ⇒ 引擎会把便笺那侧当成"改过的一方"，把便笺内容写过去 ——
+    #   也就是**以便笺为准对齐**，和本项目"便笺是权威源"的设定一致。
+    store.upsert_link(mid, gid, content_hash(m.get("text")),
+                      g.get("change_key", "") or "",
+                      iso_to_ms(m.get("modified_iso") or "") or 0)
+    store.log(f"手动配对：{first_line(g.get('text'))[:30]} ↔ {first_line(m.get('text'))[:30]}")
+    return {"ok": True, "graph_id": gid, "xiaomi_id": mid,
+            "message": "已配对。下次同步会以便笺为准把两侧内容对齐。"}
+
+
 def sync_loop():
     """后台同步循环。
 
@@ -974,6 +1013,26 @@ class Handler(BaseHTTPRequestHandler):
                           "info" if ok_n == len(keys) else "warn")
                 return self._json({"ok": True, "total": len(keys),
                                    "succeeded": ok_n, "results": res})
+
+            if path == "/api/pair-selected":
+                # 手动配对：勾选的 1 条便笺 + 1 条小米 → 建立映射
+                keys = [str(k) for k in (body.get("keys") or []) if str(k).strip()]
+                if not keys:
+                    return self._json({"ok": False, "error": "没有选中任何记录"}, 400)
+                if getattr(engine, "busy", False):
+                    return self._json({"ok": False,
+                                       "error": "正在同步中，等这一轮跑完再试"}, 409)
+                engine.busy = True
+                try:
+                    r = pair_selected(store, engine, keys)
+                finally:
+                    engine.busy = False
+                if r.get("ok"):
+                    try:
+                        engine.fetch_only(source="manual")
+                    except Exception:
+                        pass
+                return self._json(r)
 
             if path == "/api/pair-by-content":
                 # 按内容给两侧已有的笔记建立映射（一次性整理）。
