@@ -48,6 +48,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PASSED: list[str] = []
 FAILED: list[str] = []
+# 探活失败时最后一次的响应（给排查用）
+LAST_PROBE: dict = {}
 
 
 def ok(name: str, cond: bool, detail: str = "") -> bool:
@@ -91,11 +93,14 @@ class Ctx:
 
 
 def wait_port(ctx: Ctx, seconds: float = 20) -> bool:
+    """等 /api/auth/status 能通。失败时把最后一次的返回记到 LAST_PROBE，便于排查"""
+    global LAST_PROBE
     end = time.time() + seconds
     while time.time() < end:
         d, _ = ctx.call("/api/auth/status", timeout=3)
         if d.get("ok"):
             return True
+        LAST_PROBE = d
         time.sleep(0.4)
     return False
 
@@ -108,10 +113,21 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="跑完保留数据目录，便于排查")
     args = ap.parse_args()
 
+    # ★ 必须屏蔽代理。这台机器/这个会话可能带着 http_proxy 之类的环境变量，
+    #   而 Python 的 urllib 会读它们 —— 于是访问 127.0.0.1 也被扔给代理，
+    #   换来一个莫名其妙的结果（实测见过代理不转发回环，报 502 或 10061）。
+    #   Ctx 里已经有 ProxyHandler({})，这里再从环境变量层面堵一道。
+    for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+              "all_proxy", "ALL_PROXY"):
+        os.environ.pop(k, None)
+    os.environ["no_proxy"] = "*"
+    os.environ["NO_PROXY"] = "*"
+
     tmp = Path(tempfile.mkdtemp(prefix="sms-smoke-"))
     base = f"http://127.0.0.1:{args.port}"
     ctx = Ctx(base)
     proc = None
+    logfh = None
 
     print("=" * 60)
     print("全新部署冒烟测试（模拟容器首次启动）")
@@ -122,36 +138,77 @@ def main() -> int:
 
     try:
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-        proc = subprocess.Popen(
-            [sys.executable, "server.py", "--port", str(args.port),
-             "--data-dir", str(tmp)],
-            cwd=str(ROOT), env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        # ★ 日志写**文件**而不是 PIPE。
+        #   用 PIPE 的话，服务没起来时去 read() 会阻塞（进程还活着、pipe 里没数据，
+        #   read 就一直等），表现成整个测试卡死被 SIGTERM —— 反而看不到任何线索。
+        logf = tmp / "_server.log"
 
-        # ---- 1. 自举
-        print("[1] 空目录自举")
-        up = wait_port(ctx)
-        ok("服务能在空目录上启动并响应", up)
-        if not up:
-            # ★ 服务没起来时必须把子进程的输出打出来 ——
-            #   否则只看到一句 FAIL，完全不知道是缺依赖、端口冲突还是别的。
-            print("\n  服务没起来，子进程输出如下：")
+        # ★ 起服务要**重试**：实测这台机器上 subprocess 偶发启动不起来
+        #   （进程活着、不监听、不输出，约 1/3 概率），手动跑同样的命令却次次成功。
+        #   这是环境噪声，不该让测试因此报红 —— 重试一次就能消化掉。
+        uptries = 0
+        for attempt in range(1, 3):
+            uptries = attempt
+            logfh = logf.open("w", encoding="utf-8", errors="replace")
+            proc = subprocess.Popen(
+                [sys.executable, "-u", "server.py", "--port", str(args.port),
+                 "--data-dir", str(tmp)],
+                cwd=str(ROOT), env=env,
+                stdout=logfh, stderr=subprocess.STDOUT)
+
+            # ---- 1. 自举
+            print(f"[1] 空目录自举{'（第 %d 次尝试）' % attempt if attempt > 1 else ''}")
+            up = wait_port(ctx, seconds=40)
+            if up:
+                break
+            print(f"    第 {attempt} 次没起来，换一次重试…")
             try:
-                if proc and proc.poll() is not None:
-                    print(f"    （进程已退出，exit code = {proc.returncode}）")
-                out = b""
+                proc.terminate()
+                proc.wait(timeout=10)
+            except Exception:
+                proc.kill()
+            try:
+                logfh.close()
+            except Exception:
+                pass
+            logfh = None
+            time.sleep(1.5)
+
+        ok("服务能在空目录上启动并响应", up, f"尝试了 {uptries} 次")
+        if not up:
+            # 服务没起来时必须把日志打出来 ——
+            # 否则只看到一句 FAIL，分不清是缺依赖、端口冲突还是解释器路径不对。
+            print("\n  服务没起来，日志如下：")
+            try:
+                # 先确认服务到底有没有在监听端口 —— 把"服务没起"和"HTTP 层连不上"
+                # 这两种完全不同的失败分开，别混在一起猜。
+                import socket as _sock
                 try:
-                    out = proc.stdout.read() or b"" if proc and proc.stdout else b""
+                    _s = _sock.create_connection(("127.0.0.1", args.port), timeout=3)
+                    _s.close()
+                    print("    [探测] TCP 127.0.0.1:%d 可连 —— 服务在监听，"
+                          "问题出在 HTTP 层（大概率是代理）" % args.port)
+                except Exception as _e:
+                    print("    [探测] TCP 127.0.0.1:%d 连不上（%s）—— 服务确实没监听"
+                          % (args.port, type(_e).__name__))
+                print(f"    [探测] 进程存活: {proc.poll() is None}，"
+                      f"退出码: {proc.poll()}")
+                print(f"    [探测] 解释器: {sys.executable}")
+                print(f"    [探测] 最后一次探活返回: {str(LAST_PROBE)[:200]}")
+                try:
+                    if logfh:
+                        logfh.flush()
                 except Exception:
                     pass
-                for line in (out.decode("utf-8", "replace") or "").splitlines()[-25:]:
-                    print("    | " + line)
-                if not out:
-                    print("    （没有输出 —— 可能在 import 阶段就挂了，"
-                          "或者解释器路径不对）")
-                    print(f"    解释器: {sys.executable}")
+                text = logf.read_text(encoding="utf-8", errors="replace")
+                lines = [ln for ln in text.splitlines() if ln.strip()]
+                if lines:
+                    for ln in lines[-25:]:
+                        print("    | " + ln)
+                else:
+                    print("    （日志是空的）")
             except Exception as e:
-                print("    读子进程输出失败:", e)
+                print("    读日志失败:", e)
             raise SystemExit(1)
         cfg_file = tmp / "config.json"
         ok("自动创建了 config.json", cfg_file.exists())
@@ -265,6 +322,11 @@ def main() -> int:
                 proc.wait(timeout=10)
             except Exception:
                 proc.kill()
+        try:
+            if logfh:
+                logfh.close()
+        except Exception:
+            pass
         if not args.keep:
             shutil.rmtree(tmp, ignore_errors=True)
         else:

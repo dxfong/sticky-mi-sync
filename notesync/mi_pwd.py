@@ -59,6 +59,29 @@ STATE: dict[str, Any] = {
     "user": "",
 }
 
+# ★ 登录第一步拿到的 serviceParam / qs / callback / _sign —— **必须留着**。
+#
+# 为什么不能验证完再重新 GET 一次 serviceLogin：
+#   那时 session 已经登录了，返回的内容不一样（没有 serviceParam 这些字段），
+#   于是 `head["serviceParam"]` 直接 KeyError。
+#   实测报错就是：`验证通过但后续失败：'serviceParam'`。
+#
+# migate 的做法可以对照：它的 auth_data 在登录**之前**构造好，
+# 然后一路传下去（passtoken.py → terminal.py → verify.py），
+# 最后 `post(SERVICELOGINAUTH2_URL, data=auth_data)` 用的还是同一份。
+_LOGIN_CTX: dict[str, Any] = {}
+
+
+def _save_login_ctx(auth_data: dict[str, Any]) -> None:
+    with LOCK:
+        _LOGIN_CTX.clear()
+        _LOGIN_CTX.update(auth_data)
+
+
+def _load_login_ctx() -> dict[str, Any]:
+    with LOCK:
+        return dict(_LOGIN_CTX)
+
 
 def status() -> dict[str, Any]:
     with LOCK:
@@ -142,6 +165,8 @@ def login(user: str, password: str, capt_code: str = "") -> dict[str, Any]:
             "callback": head["callback"],
             "_sign": head["_sign"],
         })
+        # ★ 留着 —— 二次验证通过后要用同一份重新登录，别再去 GET 一次
+        _save_login_ctx(auth_data)
     except Exception as e:
         _set(phase="error", message=f"连不上小米登录服务：{e}")
         return {"ok": False, "error": str(e)}
@@ -296,8 +321,7 @@ def send_code(address_type: str, capt_code: str = "") -> dict[str, Any]:
 def check_code(ticket: str) -> dict[str, Any]:
     """提交验证码。成功后**必须重新登录一次** —— 那样 session 才是「已验证」的。"""
     get, post, session = _http()
-    from migate.config import (VERIFY_EM, VERIFY_PH, SERVICELOGINAUTH2_URL,
-                               SERVICELOGIN_URL)
+    from migate.config import VERIFY_EM, VERIFY_PH, SERVICELOGINAUTH2_URL
 
     ticket = (ticket or "").strip()
     if not ticket:
@@ -324,23 +348,25 @@ def check_code(ticket: str) -> dict[str, Any]:
         _set(phase="error", message=f"验证没通过：{msg}")
         return {"ok": False, "error": msg}
 
-    # ---- 验证过了，把跳转走完，再**重新登录**拿「已验证」的 session
+    # ---- 验证过了，把跳转走完，再**用登录时那份参数**重新登录一次。
+    #
+    #   为什么必须复用那份、不能重新 GET serviceLogin：
+    #     此时 session 已登录，serviceLogin 返回的内容不含 serviceParam/qs/_sign，
+    #     直接 KeyError（实测报错：`验证通过但后续失败：'serviceParam'`）。
+    #     migate 的 verify.py 结尾也是 `post(AUTH2, data=auth_data)` —— 同一份。
+    auth_data = _load_login_ctx()
+    if not auth_data.get("serviceParam"):
+        _set(phase="error", message="登录上下文丢失，请重新登录一次")
+        return {"ok": False, "error": "登录上下文丢失，请重新点一次登录"}
+
     try:
         r1 = get(loc, allow_redirects=False, timeout=STEP_TIMEOUT)
         loc2 = r1.headers.get("Location")
         if loc2:
             get(loc2, allow_redirects=False, timeout=STEP_TIMEOUT)
 
-        # 重新走一遍登录：这次小米不会再要验证（session 已标记为已验证）
-        auth_data: dict[str, Any] = {"sid": "i.mi.com", "_json": True}
-        r = get(SERVICELOGIN_URL, params=auth_data, timeout=STEP_TIMEOUT)
-        head = _body(r.text)
-        auth_data.update({"serviceParam": head["serviceParam"], "qs": head["qs"],
-                          "callback": head["callback"], "_sign": head["_sign"]})
-
-        # ★ 只传 auth_data，**不要再传 user/密码** ——
-        #   登录态已经在 session cookie 里了，多传反而会被当成新的一次登录。
-        #   （migate 的 verify.py 结尾就是这么做的：post(AUTH2, data=auth_data)。）
+        # ★ 只传 auth_data（里面已有 userId 等登录信息），**不要再传账号密码** ——
+        #   登录态就在 session cookie 里，多传反而会被当成新的一次登录。
         r2 = post(SERVICELOGINAUTH2_URL, data=auth_data, timeout=STEP_TIMEOUT)
         d2 = _body(r2.text)
     except Exception as e:
