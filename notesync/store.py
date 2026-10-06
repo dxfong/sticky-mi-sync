@@ -85,7 +85,14 @@ CREATE TABLE IF NOT EXISTS link (
     mi_modifydate   INTEGER,
     last_synced_at  INTEGER,
     tombstone       INTEGER DEFAULT 0,
-    conflict        INTEGER DEFAULT 0
+    conflict        INTEGER DEFAULT 0,
+    -- ★ 便笺侧的时间是不是"同步器补建时盖上去的"（不是用户真实修改时间）。
+    --   为什么需要这个标记：Outlook REST **不接受客户端指定时间**（实测
+    --   POST 带 CreatedDateTime 被忽略、PATCH LastModifiedDateTime 也改不动），
+    --   所以"从小米侧补建到便笺侧"的记录，云端时间必然是补建那一刻，
+    --   而不是内容原本的时间 —— 结果是它会虚假地排到列表最前。
+    --   有了这个标记，列表排序就能改用另一侧（原始侧）的时间。
+    graph_time_synthetic INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS cred (
     k TEXT PRIMARY KEY,
@@ -149,6 +156,7 @@ class Store:
         self.db = sqlite3.connect(self.data_dir / "state.db", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
         self.cfg = self._load_config()
         # ★ 首次启动就把默认配置落盘。
@@ -159,6 +167,21 @@ class Store:
             self.save_config()
 
     # ---------------------------------------------------------------- 配置
+    def _migrate(self) -> None:
+        """给**已有的库**补新列（`CREATE TABLE IF NOT EXISTS` 对老表不会加列）。
+
+        SQLite 的 `ADD COLUMN` 不支持 `IF NOT EXISTS`，所以只能先查列名、
+        或者直接 try 掉"duplicate column"。这里用后者 —— 更少一次查询，
+        而且能覆盖"列名大小写不一致"这类怪情况。
+        """
+        for stmt in (
+            "ALTER TABLE link ADD COLUMN graph_time_synthetic INTEGER DEFAULT 0",
+        ):
+            try:
+                self.db.execute(stmt)
+            except sqlite3.OperationalError:
+                pass          # 列已存在
+
     def _load_config(self) -> dict[str, Any]:
         cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # 深拷贝默认值
         if self.cfg_path.exists():
@@ -271,13 +294,15 @@ class Store:
         mi_modifydate: int = 0,
         tombstone: int = 0,
         conflict: int = 0,
+        graph_time_synthetic: int = 0,
     ) -> None:
         with self._lock:
             self.db.execute(
                 """
                 INSERT INTO link(mi_id, graph_id, base_hash, graph_changekey,
-                                 mi_modifydate, last_synced_at, tombstone, conflict)
-                VALUES(?,?,?,?,?,?,?,?)
+                                 mi_modifydate, last_synced_at, tombstone, conflict,
+                                 graph_time_synthetic)
+                VALUES(?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(mi_id) DO UPDATE SET
                     graph_id=excluded.graph_id,
                     base_hash=excluded.base_hash,
@@ -285,10 +310,12 @@ class Store:
                     mi_modifydate=excluded.mi_modifydate,
                     last_synced_at=excluded.last_synced_at,
                     tombstone=excluded.tombstone,
-                    conflict=excluded.conflict
+                    conflict=excluded.conflict,
+                    graph_time_synthetic=excluded.graph_time_synthetic
                 """,
                 (mi_id, graph_id or None, base_hash, graph_changekey,
-                 mi_modifydate, int(time.time()), tombstone, conflict),
+                 mi_modifydate, int(time.time()), tombstone, conflict,
+                 int(graph_time_synthetic or 0)),
             )
             self.db.commit()
 

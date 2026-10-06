@@ -878,15 +878,26 @@ class Handler(BaseHTTPRequestHandler):
                 if mid:
                     used_m.add(mid)
                 gs, ms = g_side(g), m_side(m)
+                g_time = (gs or {}).get("time") or ""
+                m_time = (ms or {}).get("time") or ""
+                # ★ 便笺侧的时间可能不是"内容原本的时间"：
+                #   从**小米侧补建过来**的便笺，云端时间必然是补建那一刻
+                #   （Outlook REST 不接受客户端指定时间，实测过）。
+                #   那种情况下改用**小米侧**的时间 —— 否则这条会虚假地排到最前。
+                #   标记由 engine 在补建时写进 link.graph_time_synthetic。
+                if l.get("graph_time_synthetic") and m_time:
+                    row_time = m_time
+                else:
+                    row_time = max(g_time, m_time)
                 rows.append({
                     "key": "link:" + str(mid),
                     "graph": gs,
                     "xiaomi": ms,
                     "linked": True,
                     "conflict": bool(l.get("conflict")),
-                    # 排序时间取两侧较新的那个 —— 任一侧有改动都该往上浮
-                    "time": max((gs or {}).get("time") or "",
-                                (ms or {}).get("time") or ""),
+                    # 便笺侧云端时间不可信（补建盖的）—— 前端可据此提示
+                    "time_synthetic": bool(l.get("graph_time_synthetic")),
+                    "time": row_time,
                 })
 
             for n in g_list:

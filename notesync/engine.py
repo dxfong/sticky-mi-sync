@@ -1049,10 +1049,18 @@ class SyncEngine:
                 if not dry:
                     created = self.graph.create_note(
                         m["text"], when_iso=ms_to_iso(m.get("modify_date")))
+                    # ★ graph_time_synthetic=1 记的是"便笺侧的云端时间不是内容原本的时间"。
+                    #   因为 **Outlook REST 不接受客户端指定时间**（实测 POST 带
+                    #   CreatedDateTime 被忽略、PATCH 也改不动），所以补建出来的
+                    #   便笺云端时间必然是"补建那一刻"。列表排序看到这个标记就改用
+                    #   小米侧的时间，否则这条会虚假地排到最前。
+                    #   （以前 fabric 通道认这个时间，注释里那句"便笺侧认"就是那时的结论；
+                    #     换通道后前提失效了 —— 2026-10-06 用户实测发现。）
                     self.store.upsert_link(mi_id, created["id"],
                                            content_hash(m["text"]),
                                            created.get("change_key", ""),
-                                           int(m.get("modify_date") or 0))
+                                           int(m.get("modify_date") or 0),
+                                           graph_time_synthetic=1)
                     if created.get("id"):
                         # 便笺侧**认**客户端传的 documentModifiedAt（已实测），
                         # 所以这里补列表项要用**小米原本的修改时间**，与服务端一致。
