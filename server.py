@@ -720,17 +720,40 @@ class Handler(BaseHTTPRequestHandler):
         #   · 用户真没登录（他自己知道）
         #   · 某个请求丢了 cookie（跨源 / 旧页面），用户会莫名其妙看到"未登录"
         #   之前只记原因没记来源，用户报"我明明是登录状态"时无从下手。
+        #
+        # ★ 再加一层"cookie 在不在"的判定 —— 实测踩到过：
+        #   请求头**有 Cookie**、来源也是同源，但仍被判未登录。
+        #   那种情况要看**它带的到底是哪个 token、为什么不被认可**，
+        #   所以把 token 指纹（前 8 位）和具体原因都记下来。
         try:
             ip = self.client_address[0] if self.client_address else "?"
             ua = (self.headers.get("User-Agent") or "")[:50]
-            has_cookie = "有" if self.headers.get("Cookie") else "无"
+            raw_cookie = self.headers.get("Cookie") or ""
             origin = self.headers.get("Origin") or self.headers.get("Referer") or "-"
-            # 注意用 RUNTIME["store"] —— Handler 类里**没有 self.store**，
-            # 写成 self.store 会 AttributeError，而它又被下面的 except 吞掉，
-            # 表现就是"日志静悄悄地不出现"（第一版就是这么写错的）。
+
+            tok = self._read_cookie()
+            if not raw_cookie:
+                detail = "请求头里没有 Cookie（浏览器没带）"
+            elif not tok:
+                detail = f"有 Cookie 但里面没有 {COOKIE}（cookie 名/路径不对？）"
+            else:
+                # 有 token 却不被认可 —— 说清是哪一种
+                from notesync.auth import token_hash as _th
+                fp = _th(tok)[:8]
+                a = self._auth()
+                sessions = a._sessions()
+                if fp not in sessions:
+                    detail = f"token {fp} 不在服务端会话表里（被吊销/表被覆盖/过期）"
+                else:
+                    rec = sessions[fp]
+                    if int(rec.get("epoch") or 0) != a._epoch():
+                        detail = (f"token {fp} 的 epoch={rec.get('epoch')} "
+                                  f"≠ 服务端 {a._epoch()}（改过密码或重置过）")
+                    else:
+                        detail = f"token {fp} 在表里但被判空闲超时"
             RUNTIME["store"].log(
-                f"未登录拦截：{path}（来自 {ip}；请求头带 Cookie={has_cookie}；"
-                f"来源 {origin[:60]}；UA {ua}）", "info")
+                f"未登录拦截：{path}（来自 {ip}；{detail}；"
+                f"来源 {origin[:50]}；UA {ua}）", "info")
         except Exception:
             pass
         self._json({"ok": False, "error": "未登录", "need_login": True}, 401)
