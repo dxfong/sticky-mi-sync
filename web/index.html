@@ -402,7 +402,19 @@ async function rawApi(path, body, base) {
 }
 
 async function api(path, body) {
-  const bases = API_BASE ? [API_BASE, ""] : ["", DEFAULT_BACKEND];
+  // ★ 只用**同源**，不再回退到 DEFAULT_BACKEND。
+  //
+  // 那个回退曾用来兜"页面被当成静态文件直接打开"的情况，但它有个副作用：
+  // 从 `192.168.x.x` 打开页面时，回退到 `127.0.0.1` 就是一次**跨源请求**，
+  // 而 fetch 默认 `credentials: "same-origin"` —— **跨源不带 cookie**。
+  // 服务端于是收到一个"没有令牌"的请求，日志里就冒出一条误导性的
+  // 「未登录：cookie 里没有会话令牌」，看起来像会话莫名丢了。
+  // （用户实测反馈过这个问题。）
+  //
+  // 现在不需要它兜底：页面本身就是从服务端加载的，同源必然可达；
+  // 万一用 file:// 打开，下面 boot 之前已经有 `location.replace(DEFAULT_BACKEND)`
+  // 把整页跳到后端去。
+  const bases = [""];
   let err = null;
   for (const b of bases) {
     try {
@@ -1808,12 +1820,29 @@ $("btnLogout").onclick = async () => {
 };
 
 $("btnSaveCfg").onclick = async () => {
-  await api("/api/config", {patch:{
-    sync_interval_sec: Number($("interval").value) || 5,
-    initial_pairing: $("pairing").value,
-    conflict_policy: $("conflict").value,
-    diff_pref: $("diffPref").value,
-  }});
+  const b = $("btnSaveCfg");
+  const old = b.textContent;
+  b.disabled = true; b.textContent = "保存中…";
+  let r;
+  try {
+    r = await api("/api/config", {patch:{
+      sync_interval_sec: Number($("interval").value) || 5,
+      initial_pairing: $("pairing").value,
+      conflict_policy: $("conflict").value,
+      diff_pref: $("diffPref").value,
+    }});
+  } catch (e) {
+    r = {ok: false, error: (e && e.message) || String(e)};
+  }
+  b.disabled = false; b.textContent = old;
+  // ★ 原来这里点完**什么都不显示** —— 用户不知道到底存上没有。
+  //   现在成功/失败都给提示；后端同时会往日志里记一条"设置已保存：…"。
+  if (r && r.ok !== false) {
+    const iv = Number($("interval").value) || 5;
+    toast(`设置已保存（间隔 ${iv} 秒）`, "ok");
+  } else {
+    toast("保存失败：" + ((r && r.error) || "未知原因"), "err");
+  }
   refresh();
 };
 document.querySelectorAll("[data-mock]").forEach(b => b.onclick = async () => {

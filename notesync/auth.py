@@ -203,12 +203,21 @@ class Auth:
         return True
 
     def _note_why(self, why: str) -> None:
-        """只在原因变化时记一次 —— 前端每 2 秒轮询，不去重会刷爆日志。"""
+        """只在原因变化时记一次 —— 前端每 2 秒轮询，不去重会刷爆日志。
+
+        级别区分：
+          · **cookie 里没有会话令牌** → `info`。这是**正常的首次访问**
+            （页面刚打开、还没登录过），不是异常。按 warn 记会让日志看起来
+            像出了问题，用户实测反馈过"我没被要求输密码，却总有这条"。
+          · 其余（会话不在表里 / epoch 不一致）→ `warn`。那些才是真的异常：
+            要么会话被吊销，要么服务端记录被覆盖。
+        """
         if getattr(self, "_last_why", "") == why:
             return
         self._last_why = why
         try:
-            self._log(f"未登录：{why}", "warn")
+            lv = "info" if "没有会话令牌" in why else "warn"
+            self._log(f"未登录：{why}", lv)
         except Exception:
             pass
 

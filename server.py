@@ -1257,6 +1257,21 @@ class Handler(BaseHTTPRequestHandler):
                             "blockers": ready["blockers"],
                         }, 409)
                 cfg = store.patch_config(patch)
+                # 记一条日志 —— 用户点「保存设置」后要能在日志里看到确认。
+                # 原来这里是**静默保存**，用户反馈"点了没有任何提示，
+                # 不知道到底存上没有"。日志是最合适的落点：既能确认，
+                # 也能事后回看"我什么时候改了什么"。
+                try:
+                    changed = []
+                    for k, v in (patch or {}).items():
+                        if isinstance(v, dict):
+                            changed += [f"{k}.{kk}={vv}" for kk, vv in v.items()]
+                        else:
+                            changed.append(f"{k}={v}")
+                    if changed:
+                        store.log("设置已保存：" + "；".join(changed)[:300])
+                except Exception:
+                    pass
                 # 刚打开自动同步时先只读拉一次，让列表立刻有内容
                 if patch.get("auto_sync") is True:
                     try:
