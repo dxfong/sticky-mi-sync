@@ -226,7 +226,11 @@ class Auth:
         不区分的话只能靠猜。这里只在**原因变化时**记一条，不刷屏。
         """
         if not token:
-            self._note_why("cookie 里没有会话令牌")
+            # **不在这里记日志** —— "请求里没有 cookie"这件事，
+            # 交给 server._guard 记，因为那边能带上"哪个接口、来自哪个 IP、
+            # 请求头到底有没有 Cookie"这些**定位必需的信息**。
+            # 这里只记原因的话，用户报"我明明是登录状态"时无从下手。
+            self._last_why = "cookie 里没有会话令牌"
             return False
         rec = self._sessions().get(token_hash(token))
         if not rec:

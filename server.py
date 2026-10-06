@@ -716,6 +716,20 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if self._logged_in():
             return False
+        # ★ 诊断必须带**来源**：只有这样才分得清两种情况 ——
+        #   · 用户真没登录（他自己知道）
+        #   · 某个请求丢了 cookie（跨源 / 旧页面），用户会莫名其妙看到"未登录"
+        #   之前只记原因没记来源，用户报"我明明是登录状态"时无从下手。
+        try:
+            ip = self.client_address[0] if self.client_address else "?"
+            ua = (self.headers.get("User-Agent") or "")[:50]
+            has_cookie = "有" if self.headers.get("Cookie") else "无"
+            origin = self.headers.get("Origin") or self.headers.get("Referer") or "-"
+            self.store.log(
+                f"未登录拦截：{path}（来自 {ip}；请求头带 Cookie={has_cookie}；"
+                f"来源 {origin[:60]}；UA {ua}）", "info")
+        except Exception:
+            pass
         self._json({"ok": False, "error": "未登录", "need_login": True}, 401)
         return True
 
