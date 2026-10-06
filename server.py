@@ -725,7 +725,10 @@ class Handler(BaseHTTPRequestHandler):
             ua = (self.headers.get("User-Agent") or "")[:50]
             has_cookie = "有" if self.headers.get("Cookie") else "无"
             origin = self.headers.get("Origin") or self.headers.get("Referer") or "-"
-            self.store.log(
+            # 注意用 RUNTIME["store"] —— Handler 类里**没有 self.store**，
+            # 写成 self.store 会 AttributeError，而它又被下面的 except 吞掉，
+            # 表现就是"日志静悄悄地不出现"（第一版就是这么写错的）。
+            RUNTIME["store"].log(
                 f"未登录拦截：{path}（来自 {ip}；请求头带 Cookie={has_cookie}；"
                 f"来源 {origin[:60]}；UA {ua}）", "info")
         except Exception:
