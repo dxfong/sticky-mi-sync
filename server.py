@@ -2044,13 +2044,31 @@ def main():
     t = threading.Thread(target=sync_loop, daemon=True)
     t.start()
 
-    # 监听地址：默认**只听本机**（安全，别人扫不到你电脑上的这个服务）。
-    # 容器里必须让外面能连进来 —— 用环境变量 SMS_HOST=0.0.0.0 覆盖
-    # （docker-compose.yml 里已经设好）。硬编码 127.0.0.1 的话端口映射不进来，
-    # 这是移植到 docker 时第一个会踩的坑。
-    host = (os.environ.get("SMS_HOST") or "").strip() or "127.0.0.1"
+    # 监听地址：默认**绑 0.0.0.0**。
+    #
+    # 这个项目主打 Docker / NAS / 软路由部署，用户拿手机、平板、另一台电脑
+    # 来访问是**常态**而不是例外 —— 默认只听本机的话，"装完打不开"是必然结果。
+    # （以前默认 127.0.0.1，靠 docker-compose 里的 SMS_HOST 覆盖，
+    #   但本机直接跑脚本的用户就会被卡住。）
+    #
+    # 另外还有**访问密码**那一层拦着，所以对外暴露 ≠ 谁都能读。
+    # 想恢复成"只允许本机"：设环境变量 `SMS_HOST=127.0.0.1`。
+    host = (os.environ.get("SMS_HOST") or "").strip() or "0.0.0.0"
     srv = ThreadingHTTPServer((host, port), Handler)
-    print(f"sticky-mi-sync 已启动 -> http://{host}:{port}")
+    print(f"sticky-mi-sync 已启动（监听 {host}）")
+    print(f"  本机访问   -> http://127.0.0.1:{port}")
+    if host in ("0.0.0.0", "::"):
+        # 顺手把局域网地址也打出来 —— 用户接下来就要用它，
+        # 而"怎么查自己的 IP"对非技术用户是个不小的门槛。
+        try:
+            import socket as _sock
+            _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+            _s.connect(("8.8.8.8", 80))          # 只为取本机出口 IP，不真发数据
+            print(f"  局域网访问 -> http://{_s.getsockname()[0]}:{port}"
+                  "   ← 手机 / 平板用这个")
+            _s.close()
+        except Exception:
+            pass
     print(f"数据目录：{data_dir}")
 
     # ★ 优雅退出。docker stop / k8s 删 Pod 都是先发 **SIGTERM**，
