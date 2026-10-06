@@ -37,6 +37,14 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 TIMEOUT = 30
 
+# 凭据刚失败后的"重试宽限"（秒）。
+#
+# 在这段时间内不算"已失效"，而是"正在重试" —— 因为 serviceToken 本来就会过期，
+# 续期偶尔会撞上网络抖动或小米限流，而下一轮往往就自愈了。
+# 不给宽限期的话，一次失败就会在页面顶部弹「小米凭据已失效，请重新登录」的大红字，
+# 用户实测碰上过：白紧张一场，几秒后自己又好了。
+RETRY_GRACE = 300
+
 # i.mi.com 是境内站点，直连比走代理稳。环境里如果设了 HTTP_PROXY，
 # urllib 默认会把请求也塞进代理，所以这里显式绕开。
 # （graph.microsoft.com 相反，需要代理时保持默认行为即可。）
@@ -874,7 +882,13 @@ class RealXiaomi:
                 return 0
         ok_at, fail_at = _n("xiaomi_ok_at"), _n("xiaomi_fail_at")
         if fail_at > ok_at:
-            cred_state = "expired"
+            # ★ 别"一次失败就宣称凭据已失效"。
+            #   serviceToken 本来就会过期，续期偶尔会撞上网络抖动 / 小米限流 ——
+            #   而下一轮往往就自愈了。用户实测见过：页面弹出大红字
+            #   「小米凭据已失效，请重新登录」，几秒后自己又好了 —— 白紧张一场。
+            #   所以给一个**重试窗口**：刚失败不久算"正在重试"，超时才算真失效。
+            cred_state = ("retrying" if (time.time() - fail_at) < RETRY_GRACE
+                          else "expired")
         elif ok_at > 0:
             cred_state = "ok"
         else:

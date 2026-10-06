@@ -259,6 +259,13 @@ class SyncEngine:
             xst = self.xiaomi.status()
             if not xst.get("connected"):
                 blockers.append("小米笔记未登录（还没提供 Cookie）")
+            elif xst.get("cred_state") == "retrying":
+                # 刚失败不久（还在重试窗口内）—— 这不是"凭据坏了"，
+                # 而是"这一轮没读通，下一轮会自己重试"。
+                # 用温和的说法，别让用户以为要去重新登录。
+                blockers.append(
+                    "小米凭据暂时读不通，正在自动重试（通常下一轮就恢复）。"
+                    "若持续超过几分钟仍如此，再用页面上的「账号密码登录」重登一次。")
             elif xst.get("cred_state") == "expired":
                 # "有 cookie 字段"和"凭据真能用"是两件事。失效了就必须拦下来，
                 # 否则开自动同步 = 每 5 秒失败一次。
