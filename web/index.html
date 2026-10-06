@@ -2290,12 +2290,16 @@ async function boot(){
   try { tabAlive = sessionStorage.getItem(TAB_KEY) === "1"; } catch (e) {}
   if (!tabAlive) {
     try { sessionStorage.setItem(TAB_KEY, "1"); } catch (e) {}
-    try {
-      const s0 = await api("/api/auth/status");
-      if (s0 && s0.logged_in) {
-        await api("/api/auth/logout", {});   // 清掉服务端会话
-      }
-    } catch (e) { /* 拿不到状态也无所谓，下面本来就要走登录页 */ }
+    // ★ 这里**刻意不调用** /api/auth/logout。
+    //
+    //   第一版调了（想的是"新标签页就把服务端会话也清掉，避免只在前端拦"),
+    //   但它会**误伤**：sessionStorage 在"浏览器恢复上次会话"等场景下
+    //   不一定会保留，一旦被清空，这段代码就会把用户**已经登录好的会话删掉**，
+    //   表现是"用着用着突然被踢回登录页"（用户实测踩到过，日志里能对上）。
+    //
+    //   现在只在**前端拦**：cookie 还在服务端，但用户不重新输密码就进不来。
+    //   对这个项目的场景（内网 / 自己的 NAS）这个强度足够 ——
+    //   它的目的是"别让同网段的人随手打开你的页面"，不是防定向攻击。
   }
 
   let st = null;
