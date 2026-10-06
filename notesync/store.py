@@ -92,7 +92,20 @@ CREATE TABLE IF NOT EXISTS link (
     --   所以"从小米侧补建到便笺侧"的记录，云端时间必然是补建那一刻，
     --   而不是内容原本的时间 —— 结果是它会虚假地排到列表最前。
     --   有了这个标记，列表排序就能改用另一侧（原始侧）的时间。
-    graph_time_synthetic INTEGER DEFAULT 0
+    graph_time_synthetic INTEGER DEFAULT 0,
+    -- ★★ 两侧**各自的**内容基线。
+    --
+    -- 为什么不能只用一个 base_hash：
+    --   两侧内容常有**细微差异**（空格/换行/存储方式 —— 这是配对能成立的
+    --   前提）。如果只记一个 base_hash（= 上一次同步后"双方一致"的内容），
+    --   那么配对时两侧本来就不同，引擎会算出 g_changed=True / m_changed=True
+    --   **两边都被判成"改过"** → 触发冲突 → 大批量互相覆盖，
+    --   而且每次覆盖都会刷新云端修改时间（微软那边的副作用），
+    --   把记录的排序彻底搅乱（用户实测踩到过）。
+    -- 记两个基线之后：配对时把两侧**当前内容**分别记下来，就都算"没改"，
+    --   不动任何一侧；之后哪一侧真被编辑了，对应那一侧的 hash 才会不匹配。
+    g_hash          TEXT,
+    m_hash          TEXT
 );
 CREATE TABLE IF NOT EXISTS cred (
     k TEXT PRIMARY KEY,
@@ -176,6 +189,10 @@ class Store:
         """
         for stmt in (
             "ALTER TABLE link ADD COLUMN graph_time_synthetic INTEGER DEFAULT 0",
+            # 两侧各自的基线（见建表处的说明）。老库补齐后是 NULL，
+            # 引擎会回退到 base_hash，行为与从前一致。
+            "ALTER TABLE link ADD COLUMN g_hash TEXT",
+            "ALTER TABLE link ADD COLUMN m_hash TEXT",
         ):
             try:
                 self.db.execute(stmt)
@@ -295,14 +312,16 @@ class Store:
         tombstone: int = 0,
         conflict: int = 0,
         graph_time_synthetic: int = 0,
+        g_hash: str | None = None,
+        m_hash: str | None = None,
     ) -> None:
         with self._lock:
             self.db.execute(
                 """
                 INSERT INTO link(mi_id, graph_id, base_hash, graph_changekey,
                                  mi_modifydate, last_synced_at, tombstone, conflict,
-                                 graph_time_synthetic)
-                VALUES(?,?,?,?,?,?,?,?,?)
+                                 graph_time_synthetic, g_hash, m_hash)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(mi_id) DO UPDATE SET
                     graph_id=excluded.graph_id,
                     base_hash=excluded.base_hash,
@@ -311,11 +330,14 @@ class Store:
                     last_synced_at=excluded.last_synced_at,
                     tombstone=excluded.tombstone,
                     conflict=excluded.conflict,
-                    graph_time_synthetic=excluded.graph_time_synthetic
+                    graph_time_synthetic=excluded.graph_time_synthetic,
+                    -- 传 None 时保留原值（调用方不用关心这两列的场景很多）
+                    g_hash=COALESCE(excluded.g_hash, link.g_hash),
+                    m_hash=COALESCE(excluded.m_hash, link.m_hash)
                 """,
                 (mi_id, graph_id or None, base_hash, graph_changekey,
                  mi_modifydate, int(time.time()), tombstone, conflict,
-                 int(graph_time_synthetic or 0)),
+                 int(graph_time_synthetic or 0), g_hash, m_hash),
             )
             self.db.commit()
 

@@ -519,13 +519,22 @@ def pair_by_content(store, engine) -> dict[str, Any]:
         n = min(len(gs), len(ms))
         for i in range(n):
             g, m = gs[i], ms[i]
-            # base_hash 仍用**严格**指纹（小米侧那份）——
-            # 于是第一次同步会判定"便笺侧改过"，把便笺内容写过去，
-            # 也就是**以便笺为准对齐**（顺便把小米侧多出来的空格抹平）。
+            # ★ 两侧各自的基线都记成**它们当前的内容**。
+            #
+            # 这是「方案 A」的关键：配对的前提就是两侧"宽松相等但有细微差异"
+            # （空格/换行）。如果只记一个 base_hash（小米侧那份），
+            # 引擎会发现便笺侧 hash 对不上 → 判"便笺改过" → 把内容写过去，
+            # 而每次写入都会刷新云端修改时间，几十条一起写还会触发服务端限流
+            # （用户实测踩到：大批量冲突 + 便笺修改时间被刷成同步时刻 + 排序乱）。
+            #
+            # 各自记基线之后：两侧都算"没改" → **一条都不写**，
+            # 差异原样保留（界面上仍显示成一绿一黄，由用户自己决定要不要对齐）。
             store.upsert_link(
                 m["id"], g["id"], content_hash(m.get("text")),
                 g.get("change_key", "") or "",
                 iso_to_ms(m.get("modified_iso") or "") or 0,
+                g_hash=content_hash(g.get("text")),
+                m_hash=content_hash(m.get("text")),
             )
             paired += 1
         leftover += abs(len(gs) - len(ms))
@@ -564,16 +573,18 @@ def pair_selected(store, engine, keys: list[str]) -> dict[str, Any]:
     if not g or not m:
         return {"ok": False, "error": "找不到这两条 —— 列表可能已过期，刷新一次再试"}
 
-    # ★ base_hash 用**小米侧**的指纹。
-    #   两侧内容本来就不同（不然"按内容配对"就配上了），第一次同步必然要挑一边。
-    #   用它 ⇒ 引擎会把便笺那侧当成"改过的一方"，把便笺内容写过去 ——
-    #   也就是**以便笺为准对齐**，和本项目"便笺是权威源"的设定一致。
+    # ★ base_hash 保留小米侧指纹（兼容仍读它的地方），
+    #   但同时把**两侧各自的基线**都记成它们当前的内容 ——
+    #   这样手动配对后两侧都算"没改"，不会立刻触发一次覆盖
+    #   （覆盖会刷新云端修改时间，把排序搅乱 —— 用户实测反馈过）。
     store.upsert_link(mid, gid, content_hash(m.get("text")),
                       g.get("change_key", "") or "",
-                      iso_to_ms(m.get("modified_iso") or "") or 0)
+                      iso_to_ms(m.get("modified_iso") or "") or 0,
+                      g_hash=content_hash(g.get("text")),
+                      m_hash=content_hash(m.get("text")))
     store.log(f"手动配对：{first_line(g.get('text'))[:30]} ↔ {first_line(m.get('text'))[:30]}")
     return {"ok": True, "graph_id": gid, "xiaomi_id": mid,
-            "message": "已配对。下次同步会以便笺为准把两侧内容对齐。"}
+            "message": "已配对。两侧内容有差异时会用指示灯标出，不会被自动改写。"}
 
 
 def sync_loop():

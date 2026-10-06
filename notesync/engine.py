@@ -795,8 +795,18 @@ class SyncEngine:
 
                 g_hash = content_hash(g["text"]) if g else None
                 m_hash = content_hash(m["text"]) if m else None
-                g_changed = bool(g) and g_hash != base
-                m_changed = bool(m) and m_hash != base
+                # ★ 优先用两侧**各自的**基线（方案 A）。
+                #
+                # 为什么：配对时两侧内容常有细微差异（空格/换行）——
+                # 这是配对能成立的前提。如果只拿一个 base_hash 来比，
+                # **两边都会被判成"改过"** → 触发冲突 → 大批量互相覆盖，
+                # 而每次覆盖都会刷新云端修改时间（微软侧的副作用），
+                # 把排序彻底搅乱（用户实测踩到过：几十条同时被判冲突）。
+                # 老数据没有这两列 → 回退到 base_hash，行为与从前一致。
+                g_base = link.get("g_hash") or base
+                m_base = link.get("m_hash") or base
+                g_changed = bool(g) and g_hash != g_base
+                m_changed = bool(m) and m_hash != m_base
 
                 # 两边都在
                 if g and m:
@@ -1554,8 +1564,12 @@ class SyncEngine:
                     break
         except Exception:
             pass
-        self.store.upsert_link(mi_id, graph_id, content_hash(text), ck or "", md,
-                               conflict=conflict)
+        # ★ 写入成功 ⇒ 两侧内容已经一致，所以**两侧基线都设成同一个 hash**。
+        #   只更新 base_hash 的话，另一侧的基线还是旧的，下一轮又会判"那一侧改过"，
+        #   于是来回互相覆盖（这正是"大批量冲突"的成因之一）。
+        h = content_hash(text)
+        self.store.upsert_link(mi_id, graph_id, h, ck or "", md,
+                               conflict=conflict, g_hash=h, m_hash=h)
 
     def _counts(self) -> dict[str, int]:
         links = self.store.all_links()
