@@ -592,6 +592,11 @@ async function refresh(){
   // 后端 /api/sync 仍然接受 dry_run，需要时可用 API 调用。
   $("pairing").value = st.config.initial_pairing || "graph_authoritative";
   $("diffPref").value = st.config.diff_pref || "";
+  // ★ 这行以前漏了 —— 于是"冲突策略"下拉框永远停在 HTML 里的第一个选项
+  //   （保留双方），用户改成"以最后修改为准"保存后刷新又变回去，
+  //   看起来像"保存无效"，其实后端一直存着，只是前端没回填。
+  //   （用户实测反馈过。）
+  $("conflict").value = st.config.conflict_policy || "keep_both";
   // （连接模式下拉已移除：微软固定 fabric、小米固定 real）
   $("cfgWarn").textContent = (x.mode === "real" && st.config.sync_interval_sec < 30)
     ? "⚠ 真实小米接口建议间隔 ≥ 30 秒，5 秒高频轮询有风控风险" : "";

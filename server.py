@@ -676,7 +676,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _logged_in(self) -> bool:
         try:
-            return self._auth().validate(self._read_cookie())
+            tok = self._read_cookie()
+            a = self._auth()
+            if not a.validate(tok):
+                return False
+            # ★ 校验通过就刷新"最后活动时间"（内部按 60 秒节流，不写爆库）。
+            #   不刷新的话，用户连续操作 40 分钟也会被当成"空闲 30 分钟"踢掉。
+            a.touch(tok)
+            return True
         except Exception:
             return False
 
@@ -685,9 +692,17 @@ class Handler(BaseHTTPRequestHandler):
         # SameSite=Lax —— 跨站 POST 不带 cookie，挡住大部分 CSRF
         # **不加 Secure**：本地/内网多半是 http，加了直接登不上。
         #   套了 https 反代的话，请在反代层补 Set-Cookie 的 Secure（见文档）。
+        #
+        # ★ **刻意不设 Max-Age** → 这是一个「会话 cookie」：
+        #   浏览器关闭后自动丢弃，下次打开页面要重新输密码
+        #   （用户明确要求"关闭页面再次打开应该要求重新登录"）。
+        #   刷新页面不会丢（同一标签页内 cookie 还在），符合"刷新保持登录"。
+        #   服务端另有 SESSION_TTL(30 天) 与 IDLE_TIMEOUT(30 分钟) 兜底 ——
+        #   cookie 是会话级的只保证"关浏览器失效"，
+        #   而"长时间挂着不动"由服务端的空闲超时来管。
         self._extra_cookie = (
-            "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Lax"
-            % (COOKIE, urllib.parse.quote(token), SESSION_TTL))
+            "%s=%s; Path=/; HttpOnly; SameSite=Lax"
+            % (COOKIE, urllib.parse.quote(token)))
 
     def _clear_cookie(self) -> None:
         self._extra_cookie = ("%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"

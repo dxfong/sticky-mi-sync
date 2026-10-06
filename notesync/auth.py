@@ -38,6 +38,17 @@ from typing import Any
 COOKIE = "sms_session"
 #: 会话有效期（秒）。30 天，够长；改密码会立刻全吊销。
 SESSION_TTL = 30 * 24 * 3600
+
+# **空闲超时**：多久没操作就要求重新输密码（秒）。
+#
+# 与 SESSION_TTL 是两回事：
+#   SESSION_TTL   = 会话记录在服务端的**绝对上限**（30 天）
+#   IDLE_TIMEOUT  = 连续多久**没有任何请求**就作废
+# 用户明确要求"多长时间未操作，应该要求重新验证密码登录"。
+IDLE_TIMEOUT = 30 * 60
+# 更新"最后活动时间"的节流间隔 —— 前端每 2 秒轮询一次，
+# 不节流的话每个请求都要写一次库。60 秒的粒度对 30 分钟的空闲判定完全够。
+TOUCH_INTERVAL = 60
 #: PBKDF2 迭代次数。写进哈希串里，以后可以单独升级老哈希。
 ITERATIONS = 260_000
 #: 密码最短长度。个人自用工具，不做复杂度硬要求（那只会逼出 "abc123!"）。
@@ -170,10 +181,38 @@ class Auth:
         token = secrets.token_urlsafe(32)
         with self._lock:                 # 读-改-写必须原子，否则并发登录互相覆盖
             s = self._sessions()
-            s[token_hash(token)] = {"exp": time.time() + SESSION_TTL,
-                                    "epoch": self._epoch()}
+            now = time.time()
+            s[token_hash(token)] = {"exp": now + SESSION_TTL,
+                                    "epoch": self._epoch(),
+                                    "last_seen": now}
             self._save_sessions(s)
         return token
+
+    def touch(self, token: str | None) -> None:
+        """刷新会话的"最后活动时间"（带节流）。
+
+        为什么要单独一个方法：`validate()` 只读，不能顺手写库 ——
+        前端每 2 秒轮询一次，每个请求都写一次会话表既浪费又会产生
+        无谓的磁盘写。这里按 TOUCH_INTERVAL 节流（默认 60 秒写一次），
+        对 30 分钟粒度的空闲判定完全够用。
+        """
+        if not token:
+            return
+        try:
+            key = token_hash(token)
+            with self._lock:
+                s = self._sessions()
+                rec = s.get(key)
+                if not rec:
+                    return
+                now = time.time()
+                if now - float(rec.get("last_seen") or 0) < TOUCH_INTERVAL:
+                    return          # 刚更新过，跳过
+                rec["last_seen"] = now
+                s[key] = rec
+                self._save_sessions(s)
+        except Exception:
+            pass
 
     def validate(self, token: str | None) -> bool:
         """cookie 里的令牌是否有效。
@@ -200,6 +239,19 @@ class Auth:
         if int(rec.get("epoch") or 0) != self._epoch():
             self._note_why("会话的 epoch 与服务端不一致（改过密码/重置过）")
             return False
+        # ★ 空闲超时：连续多久没操作就作废，要求重新输密码。
+        #   记录里没有 last_seen 的（老版本签发的）视为刚活动过，
+        #   否则升级后所有人会被立刻踢下线。
+        last = rec.get("last_seen")
+        if last is not None:
+            try:
+                if time.time() - float(last) > IDLE_TIMEOUT:
+                    self._note_why(
+                        f"超过 {IDLE_TIMEOUT // 60} 分钟未操作，会话已作废"
+                        "（需要重新输入密码）")
+                    return False
+            except (TypeError, ValueError):
+                pass
         return True
 
     def _note_why(self, why: str) -> None:
