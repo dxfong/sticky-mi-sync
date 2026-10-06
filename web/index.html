@@ -1891,11 +1891,26 @@ function closeDetail(){
 }
 $("detailClose").onclick = closeDetail;
 
-// 点面板**以外**任何地方也收回 —— 用惯了的人都这样点，
-// 只能按"关闭"按钮会很别扭。判据是"点击目标正好是遮罩本身"：
-// 面板内部的点击 target 会是里面的元素，不会命中这里。
-$("detail").addEventListener("click", (e) => {
-  if (e.target === $("detail")) closeDetail();
+// 点面板**以外**任何地方也收回 —— 用惯了的人都这样点，只能按「关闭」很别扭。
+//
+// ★ 必须监听 document，不能监听 #detail 自己：
+//   `.detail` 是 `position:fixed; right:0; width:min(560px,92vw)` —— 它只占右侧，
+//   是**侧滑面板**而不是全屏遮罩。所以点"面板以外"时，事件目标是页面左侧的
+//   其它元素，压根不会经过 #detail，挂在自己身上的 click 永远收不到
+//   （第一版就是这么写错的，用户实测反馈"没实现"）。
+//
+// 两个排除条件：
+//   · 点在面板内部 → 不关
+//   · 点的是列表行（[data-key]）→ 那是在"切换到另一条记录"，交给它自己的
+//     处理逻辑打开新内容。不排除的话：点行 → 打开面板 → 同一个 click 冒泡到这里
+//     → 立刻又把刚打开的面板关掉（表现为"点行没反应"）。
+document.addEventListener("click", (e) => {
+  const d = $("detail");
+  if (!d.classList.contains("open")) return;
+  if (d.contains(e.target)) return;
+  if (e.target.closest && e.target.closest("[data-key]")) return;
+  if (e.target.closest && e.target.closest("#detail")) return;
+  closeDetail();
 });
 // Esc 也收回（键盘用户）
 document.addEventListener("keydown", (e) => {

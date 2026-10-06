@@ -188,6 +188,53 @@ def main() -> int:
         ok("回收站存在", page.locator("#trashToggle").count() > 0)
         ok("备份按钮存在", page.locator("#btnBackup").count() > 0)
 
+        # ---- 7b. 详情面板「点外部收回」（用户实测反馈过第一版没生效）
+        #
+        # 第一版把监听挂在 #detail 自己身上，但它是**侧滑面板**不是全屏遮罩
+        # （position:fixed; right:0; width:min(560px,92vw)）——
+        # 点"面板以外"时事件根本不经过它，所以永远收不到。
+        # 这里把三种交互**都验到行为**，不能只看代码。
+        print("\n[7b] 详情面板的点外部 / Esc 收回")
+        page.evaluate("document.getElementById('detail').classList.add('open')")
+        ok("能置为打开态", page.evaluate(
+            "document.getElementById('detail').classList.contains('open')"))
+
+        # ① 点面板**外部**（左侧空白）→ 应收起
+        page.mouse.click(20, 300)
+        page.wait_for_timeout(350)
+        ok("★ 点面板以外会被收回",
+           not page.evaluate(
+               "document.getElementById('detail').classList.contains('open')"),
+           "仍处于打开态 —— 监听没生效（这正是用户报的问题）")
+
+        # ② 点面板**内部** → 不该收起
+        page.evaluate("document.getElementById('detail').classList.add('open')")
+        # ★ 必须等滑入动画结束（.detail 有 transform .22s）再取坐标 ——
+        #   否则 bounding_box() 拿到的是"还在滑动中"的位置，点击会落空。
+        page.wait_for_timeout(450)
+        box = page.locator("#detailBody").bounding_box()
+        if box:
+            cx = box["x"] + box["width"] / 2
+            cy = box["y"] + min(30, box["height"] / 2)
+            hit = page.evaluate(
+                "([x,y]) => { const e=document.elementFromPoint(x,y);"
+                " return e ? (e.id || e.className || e.tagName) : null; }",
+                [cx, cy])
+            page.mouse.click(cx, cy)
+            page.wait_for_timeout(300)
+            ok("点面板内部不会误关", page.evaluate(
+                "document.getElementById('detail').classList.contains('open')"),
+               f"点击坐标 ({cx:.0f},{cy:.0f}) 上的元素是 {hit}")
+        else:
+            ok("点面板内部不会误关", False, "拿不到 #detailBody 位置")
+
+        # ③ Esc → 应收起
+        page.evaluate("document.getElementById('detail').classList.add('open')")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        ok("Esc 能收回", not page.evaluate(
+            "document.getElementById('detail').classList.contains('open')"))
+
         # ---- 8. JS 错误
         print("\n[8] 浏览器控制台")
         # favicon 的 404 不算问题（浏览器自动请求，缺失不影响任何功能）
