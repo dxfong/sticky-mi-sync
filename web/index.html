@@ -2271,6 +2271,33 @@ async function boot(){
   //   于是登录框照常显示 —— 用户输入密码、点「登录」，才蹦出一句
   //   "Failed to fetch"，看着像是密码错了。这里直接从根上跳回后端地址。
   if (location.protocol === "file:") { location.replace(DEFAULT_BACKEND + "/"); return; }
+
+  // ★ 「关闭页面再打开要重新登录」——用 sessionStorage 实现。
+  //
+  //   为什么不用会话 cookie 就够：cookie 是**浏览器级**的，
+  //   关掉标签页不会让它失效（只有退出浏览器进程才会）——
+  //   而用户说的"关闭页面"是关标签页，所以那个机制对他无效（实测反馈过）。
+  //
+  //   sessionStorage 的生命周期恰好是**标签页**：
+  //     · 刷新（F5）        → 保留  → 保持登录   ✅
+  //     · 关掉标签页再打开  → 清空  → 要求登录   ✅
+  //   这正好对上用户的两条要求，也是区分"刷新"和"重开"的唯一可靠手段。
+  //
+  //   新标签页打开时**主动登出服务端会话**，否则 cookie 还在、直接调 API 照样能用，
+  //   只在前端拦只是障眼法。
+  const TAB_KEY = "sms_tab";
+  let tabAlive = false;
+  try { tabAlive = sessionStorage.getItem(TAB_KEY) === "1"; } catch (e) {}
+  if (!tabAlive) {
+    try { sessionStorage.setItem(TAB_KEY, "1"); } catch (e) {}
+    try {
+      const s0 = await api("/api/auth/status");
+      if (s0 && s0.logged_in) {
+        await api("/api/auth/logout", {});   // 清掉服务端会话
+      }
+    } catch (e) { /* 拿不到状态也无所谓，下面本来就要走登录页 */ }
+  }
+
   let st = null;
   try { st = await api("/api/auth/status"); }
   catch (e) { lastErr = String((e && e.message) || e); }
