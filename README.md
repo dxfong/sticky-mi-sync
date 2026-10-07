@@ -12,18 +12,29 @@
 
 | 端 | 应用 | 说明 |
 |---|---|---|
-| **PC / macOS** | **微软便笺**（Sticky Notes） | Windows 自带、macOS 上有客户端；也可在 Outlook 网页版看 |
-| **Android** | **小米笔记** | 手机系统自带，不用装任何第三方 App |
-| **iOS / iPadOS** | **小米笔记** | 同上 |
+| **Windows** | **微软便笺**（Sticky Notes） | 系统自带、零安装 |
+| **macOS** | **备忘录**（Notes） | 系统自带、零安装 |
+| **iOS / iPadOS** | **备忘录**（Notes） | 系统自带、零安装 |
+| **Android** | **小米笔记** | 系统自带、零安装 |
 
-**为什么是这两个**：它们分别是各自平台上**系统自带、零安装**的笔记工具。
+**为什么是这些**：它们都是各平台**系统自带、零安装**的笔记工具。
 于是你在哪台设备上随手记一笔，**其它设备上都能看到** —— 不需要为同步再装一个 App。
 
+```mermaid
+flowchart LR
+    G["微软便笺<br/>Windows"]
+    S["sticky-mi-sync<br/>（NAS / 软路由 · Docker）"]
+    A["小米笔记<br/>Android"]
+    N["备忘录<br/>macOS · iPhone · iPad"]
+
+    G <--> S
+    S <--> A
+    S <--> N
 ```
-微软便笺 ──┐                        ┌── 小米笔记（Android）
-  PC/Mac   ├──→  sticky-mi-sync  ←──┤
-           │      （你的 NAS）       └── 小米笔记（iPhone/iPad）
-```
+
+> 上图用 Mermaid 画（GitHub / GitLab / Gitee / VS Code 都能直接渲染）。
+> 早先这里是一张纯字符拼的 ASCII 图，**中西文混排在不同渲染器里宽度不一致**，
+> 经常对不齐 —— 换成 Mermaid 后由渲染器自己排版，不会再歪。
 
 **特性**：
 
