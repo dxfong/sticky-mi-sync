@@ -47,6 +47,9 @@ PULL_LABEL = {
     "auto": "自动",
     "startup": "启动",
     "switch": "开关",
+    # 被自动暂停后，后台每隔 5 分钟做的**只读探测**。单独一个来源名 ——
+    # 日志里看到"探测拉取…"就知道这是"在试着爬回来"，不是正式同步。
+    "probe": "探测",
 }
 
 # 小米写接口的配额异常。写在 xiaomi.py 里（那一层才知道 HTTP 细节），
@@ -58,13 +61,137 @@ except Exception:                      # pragma: no cover
     class QuotaExceeded(RuntimeError):
         pass
 
-# 连续失败几轮就自动暂停自动同步。
-# 凭据一过期，5 秒一轮的循环会变成 5 秒一条错误日志 —— 真正有用的那条信息
-# 会被自己刷掉，还白打接口。3 轮（默认 15 秒）足够区分"偶发抖动"和"真的坏了"。
+# ---------------------------------------------------------------- 致命 / 非致命
+#
+# ★★★ 这一节是整个"该不该停、该不该通知人"的判定中枢。用户明确要求：
+#     「非致命错误继续重试，不要停止同步，致命错误才写提示」
+#
+# 原来的实现是**一锅端**：不管什么错，连 3 轮就暂停自动同步。
+# 后果用户实测到了（2026-10-07 18:52）：
+#   服务器到微软的链路抖了一下（`URLError: SSL UNEXPECTED_EOF_WHILE_READING`），
+#   于是自动同步被关了 —— 而这恰恰是**最不该关**的情况：
+#   网络抖动过几分钟自己就好了，暂停不但没帮上忙，
+#   还让用户第二天才发现"昨天一整天没同步"。
+#
+# 所以判定规则改成两条，**互不干扰**：
+#
+#   ┌ 非致命（网络类）───────────────────────────────────────┐
+#   │ 继续重试，**永不暂停**。慢一点没关系，卡住不动的代价更大。 │
+#   │ 日志降级成 warn（不是 error）—— 它是"暂时不通"，不是"坏了" │
+#   └──────────────────────────────────────────────────────┘
+#   ┌ 致命（要人介入）─────────────────────────────────────┐
+#   │ 重试再多次也没用，只会白打接口 + 刷屏 → 暂停 + 写提示笔记   │
+#   └────────────────────────────────────────────────────┘
+#
+# 判定顺序很关键：**先问"是不是致命的"，再问"是不是非致命的"**。
+# 反过来的话，一个"看起来像网络问题"的凭据失效会被错判成可重试。
+
+# 「重试有用」的错误类型 —— 只认**连接层**：
+#   · 连接被重置 / 中途断开（URLError 包着 SSLEOFError 等）
+#   · 超时
+# 刻意**排除** `urllib.error.HTTPError`：它虽然是 URLError 的子类，
+# 但那是服务端明确回了一个状态码（401/403/404…），重试同一个请求毫无意义。
+TRANSIENT_NET_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError)
+
+# 「重试没用、必须人去处理」的关键词。
+# 为什么用关键词而不是异常类型：这些错误从各个 provider 里以
+# RuntimeError 形式冒上来，类型信息在半路就丢了，只有消息文本可靠。
+FATAL_PATTERNS = (
+    # 凭据类 —— 这几条是"要用户重新登录"的核心特征
+    "invalid_grant", "invalid_client", "unauthorized_client",
+    "refresh token", "refresh_token",
+    "AADSTS",                       # 微软身份平台的错误码前缀
+    "InvalidAuthenticationToken", "TokenExpired", "token 已过期",
+    "凭据已失效", "凭据不可用", "已失效", "重新登录", "需要重新登录",
+    "未登录", "没有登录", "not logged in", "login required",
+    "401", "403",                   # 明确的身份/权限拒绝
+    # 配置类 —— 改配置才能好，等一万年也不会自己好
+    "找不到文件夹", "client_id", "尚未配置", "未配置",
+    # 端点/权限类
+    "Resource not found for the segment",
+)
+
+
+def _is_fatal_error(e: BaseException) -> bool:
+    """这个错误是不是"重试也没用、必须人去处理"？
+
+    ★ 注意顺序：**先判致命**。`URLError` 里包着的异常一旦带上凭据特征
+    （比如 `RuntimeError("微软便笺凭据已失效") from URLError(...)`），
+    必须先被认成致命 —— 反过来会让它落进"可重试"里，永远重试下去。
+    """
+    if isinstance(e, QuotaExceeded):
+        return False            # 配额有冷却，到点自己会好（单独一条路径）
+    if isinstance(e, urllib.error.HTTPError):
+        # HTTPError 是 URLError 子类，必须先挑出来单独看状态码：
+        #   401/403 → 身份问题，致命
+        #   5xx     → 服务端抽风，**非致命**（等一会儿就好）
+        if e.code in (401, 403):
+            return True
+        return False
+    # 消息里出现凭据/配置特征 → 致命。连 __cause__ 一起看，
+    # 因为 provider 常常把底层异常挂在 cause 上。
+    for node in (e, getattr(e, "__cause__", None)):
+        if node is None:
+            continue
+        try:
+            msg = str(node)
+        except Exception:
+            continue
+        for pat in FATAL_PATTERNS:
+            if pat in msg:
+                return True
+    return False
+
+
+def _error_kind(e: BaseException) -> str:
+    """把错误分成三类，供不同处理路径使用：
+
+      `"fatal"`       —— 致命，要暂停 + 通知人
+      `"transient"`   —— 网络抖动，继续重试，**不暂停**
+      `"unknown"`     —— 认不出来，当非致命处理（宁可多跑，不可误停）
+    """
+    if _is_fatal_error(e):
+        return "fatal"
+    if _is_transient_net_error(e):
+        return "transient"
+    return "unknown"
+
+
+# 连续失败几轮就自动暂停自动同步 —— **只数致命失败**。
+#
+# ★ 原来这里数的是"全部失败"，于是网络抖动也会把计数推上去。
+#   用户实测就是这样被停掉的。改成只数致命失败后：
+#     网络抖动 → 一直重试，计数不动
+#     凭据失效 → 3 轮（默认 15 秒）就停，不等它刷满日志
 FAIL_STREAK_LIMIT = 3
 
 # 日志里给两侧起的中文名（"拉取微软便笺列表：165 条"比 "graph: 165" 好读）
 SIDE_LABEL = {"graph": "微软便笺", "xiaomi": "小米笔记"}
+
+# ---------------------------------------------------------- 暂停后的自动恢复
+#
+# 就算是**致命错误**（凭据失效）导致的暂停，也不该"停到天荒地老" ——
+# 用户重新登录完，服务应该自己发现并接着跑，而不是还要他去点一下开关。
+# 所以暂停后每 PROBE_INTERVAL_SEC 做一次**轻量探测**（只读拉列表）。
+#
+# 为什么必须是**长间隔**：暂停的意义是"别再每 5 秒失败一次刷屏 + 空打接口"。
+# 如果探测还是 5 秒一次，暂停就等于没暂停。
+PROBE_INTERVAL_SEC = 300          # 暂停后每隔多久探测一次（秒）
+
+# ---------------------------------------------------------- 暂停提示「通知笔记」
+#
+# 用户提的第二点：「或者你可以通过新建一条记录，让用户知道服务已经停止了」
+# 这个想法很对 —— 日志要打开网页才看得到，而用户平时是在**手机的笔记 App**
+# 里看东西的。往笔记里写一条，用户在自己习惯的地方就看见了。
+#
+# ★ 只对**致命错误**写。网络抖动不写 —— 那种情况几秒后自己就好，
+#   写进去只会变成"狼来了"，用户下次看到真的提示也不当回事了。
+#
+# 靠**正文里的这个标记**来认领它（而不是记 id）：
+# 记 id 就要维护一个"提示笔记现在叫什么"的状态，一旦状态丢了就再也删不掉，
+# 用户会看到一堆重复的提示越积越多。用正文标记则任何时候都能重新找到它。
+PAUSE_HINT_MARK = "[[sticky-mi-sync-pause-notice]]"
+PAUSE_HINT_TITLE = "⚠️ 同步服务已暂停（需要处理）"
 
 
 # ---------------------------------------------------------------- 网络抖动重试
@@ -72,22 +199,44 @@ SIDE_LABEL = {"graph": "微软便笺", "xiaomi": "小米笔记"}
 # 偶发 `URLError: [SSL: UNEXPECTED_EOF_WHILE_READING]` ——
 # 实测**一小时里出现 7 次，全部断在"拉列表"这一步**（小米侧 0.36 秒，稳如磐石）。
 #
-# 这类瞬时错误重试一次基本都能过。不重试的代价不只是白跑一轮：
-# 每失败一次 `fail_streak` +1，连 3 轮就把自动同步**自己暂停**了 ——
-# 而暂停恰恰解决不了网络抖动，只会让用户以为同步坏了。
-#
-# 只认**连接层**错误。刻意排除 `urllib.error.HTTPError`：它虽然是 URLError
-# 的子类，但那是服务端明确回了一个状态码（401/403/404…），重试同一个请求
-# 没有任何意义，只会拖慢真正该做的事。
+# 这类瞬时错误重试一次基本都能过。而且**重试仍失败也不该停同步** ——
+# 用户明确要求：「非致命错误继续重试，不要停止同步」。
 TRANSIENT_NET_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError)
 PULL_RETRY_TIMES = 1          # 再试几次
 PULL_RETRY_WAIT = 2.0         # 每次之间等多久（秒）
 
 
+class TransientNetworkError(RuntimeError):
+    """**瞬时网络错误**（重试已经试过、仍然不通）—— 不是"坏了"，是"暂时不通"。
+
+    为什么要专门造一个类型，而不是直接抛原来的 `URLError`：
+      `_pull_list` 会在重试耗尽后**重新包装**异常（为了在消息里带上侧别，
+      例如"拉取微软便笺列表失败：…"）。这一包装就把 `URLError` 这个类型信息
+      弄丢了 —— 上层拿到的是一个普通的 `RuntimeError`，
+      于是它既认不出"致命"，也认不出"瞬时"，只能归到"未知"。
+
+      实测确认过：用户日志里那条真实的
+        `RuntimeError: 拉取微软便笺列表失败（已重试 1 次）：URLError: ...`
+      会被判成 `unknown`。虽然 `unknown` 的处置结果（不暂停）恰好也是对的，
+      但那是**碰巧对**，不是设计对 —— 换个策略就会出错。
+
+      所以这里给重试耗尽的情况一个**专用类型**，让"这是网络抖动"这件事
+      能安全地穿过包装层。
+    """
+
+
 def _is_transient_net_error(e: BaseException) -> bool:
-    """判断是不是「重试一下可能就好了」的网络错误。"""
+    """判断是不是「重试一下可能就好了」的网络错误。
+
+    ★ `HTTPError` 要**分开看状态码**，不能一刀切：
+        401 / 403 → 身份/权限问题，重试一万次也一样 → **不是**瞬时错误
+        5xx       → 服务端抽风（网关错误、502/503），等一会儿通常就好 → 是
+      其余 4xx（404 等）→ 请求本身有问题，重试无意义 → 不是
+    """
+    if isinstance(e, TransientNetworkError):
+        return True                       # 重试耗尽后被包装过的那一类
     if isinstance(e, urllib.error.HTTPError):
-        return False                      # 服务端已明确作答，不是抖动
+        return 500 <= int(e.code or 0) < 600
     if isinstance(e, QuotaExceeded):
         return False                      # 小米写配额，重试只会更糟
     if isinstance(e, TRANSIENT_NET_ERRORS):
@@ -236,6 +385,17 @@ class SyncEngine:
         except (TypeError, ValueError):
             self.fail_streak = 0
 
+        # ★ 由本服务**自己写进去的辅助笔记**（目前只有"暂停提示"）。
+        #
+        # 为什么单独用一个集合，而不是并进 dropped：
+        #   `dropped` 是**本轮的**、每轮开头都会重建，而提示笔记可能是在
+        #   **暂停那一刻**写进去的（那时根本没有"这一轮"），
+        #   之后任何一轮跑起来时它都已经在两侧列表里了 ——
+        #   如果那时 `dropped` 已经清空，它就会被当成"用户新建的笔记"
+        #   同步到对面去，用户的便笺里就会凭空多出一条记录。
+        #   所以这个集合的生存期是**进程级**的，且只增不减。
+        self.dropped_hint_ids: set[str] = set()
+
         # **启动时先把上次的列表从库里读回来。**
         # 列表原来只在内存里，服务一重启就空了 —— 用户看到"列表被重置、
         # 要重新拉取"，而拉一次微软侧要翻 16 页（约 20 秒）。
@@ -347,6 +507,10 @@ class SyncEngine:
 
         重试仍失败时**把侧别写进异常消息**：原来日志只有
         `同步失败：URLError: ...`，看不出是微软还是小米断的，排查只能靠猜。
+
+        ★ 抛的是 `TransientNetworkError`（不是裸 `RuntimeError`）——
+        这样"它是网络抖动"这个事实能穿过这层包装被上层认出来，
+        上层才敢判"非致命 → 继续重试、不停同步"（用户明确要求）。
         """
         label = SIDE_LABEL.get(side, side)
         last: BaseException | None = None
@@ -362,7 +526,7 @@ class SyncEngine:
                         f"拉取{label}列表遇到网络抖动（{type(e).__name__}），"
                         f"{PULL_RETRY_WAIT:g} 秒后重试…", "warn")
                     time.sleep(PULL_RETRY_WAIT)
-        raise RuntimeError(
+        raise TransientNetworkError(
             f"拉取{label}列表失败（已重试 {PULL_RETRY_TIMES} 次）："
             f"{type(last).__name__}: {last}") from last
 
@@ -441,6 +605,26 @@ class SyncEngine:
         return next((n for n in lst if str(n.get("id")) == nid), None)
 
     # ------------------------------------------------------------------ 只读拉取
+    def _is_hint(self, note: dict) -> bool:
+        """这条是不是**本服务自己写的**辅助笔记（暂停提示）。
+
+        两道判据，任一命中就算：
+          · 正文里有 `PAUSE_HINT_MARK` 标记 —— 重启后 `dropped_hint_ids` 是空的，
+            全靠这个认；这也是它能跨重启生效的原因
+          · id 在 `dropped_hint_ids` 里 —— 刚写下去、还没来得及被拉回来时用
+
+        被认出来的条目会被**排除在快照之外**：既不显示给用户，
+        也不会进"未关联条目"循环被同步到对面去。
+        """
+        if PAUSE_HINT_MARK in (note.get("text") or ""):
+            return True
+        nid = str(note.get("id") or "")
+        return bool(nid and nid in self.dropped_hint_ids)
+
+    def _hint_filtered(self, notes: list) -> list:
+        """把辅助笔记从一份列表里摘掉（见 `_is_hint`）。"""
+        return [n for n in (notes or []) if not self._is_hint(n)]
+
     def fetch_only(self, source: str = "manual") -> dict[str, Any]:
         """只读拉两侧列表，**不执行任何同步动作**。
 
@@ -454,6 +638,9 @@ class SyncEngine:
             label = SIDE_LABEL.get(name, name)
             try:
                 notes = [n for n in src.list_notes() if not n.get("deleted")]
+                # 本服务自己写的暂停提示要摘掉（见 _is_hint）——
+                # 它只是给用户看的通知，不该出现在列表里、更不该被同步到对面。
+                notes = self._hint_filtered(notes)
                 self.last_notes[name] = notes
                 # 拉成功就把这一侧落盘。
                 # **逐侧处理**：一侧失败时另一侧照样更新，
@@ -588,6 +775,11 @@ class SyncEngine:
                          if not n.get("deleted")]
                 m_all = [n for n in self._pull_list("xiaomi", self.xiaomi.list_notes)
                          if not n.get("deleted")]
+                # ★ 本服务自己写的「暂停提示」必须**在进任何判断之前**摘掉。
+                #   否则它会走"只有一边在"分支，被当成用户新建的笔记复制到对面，
+                #   用户的便笺里就会凭空多出一条内容诡异的记录（而且是每轮到一条）。
+                g_all = self._hint_filtered(g_all)
+                m_all = self._hint_filtered(m_all)
 
             # ★★★ 在**截断处**按时间倒序排，不依赖各 provider 的实现。★★★
             #
@@ -1350,8 +1542,23 @@ class SyncEngine:
             pass
         else:
             err = str(summary.get("error") or "")
-            self.store.log(f"同步失败：{err}", "error")
-            self._mark_fail(err)
+            # ★★★ 这里按"致命 / 非致命"分流（用户明确要求）。
+            #
+            # 致命（凭据失效等）：红字报错 + `_mark_fail` 计数（到阈值会暂停 + 写提示）
+            # 非致命（网络抖动等）：**降级成 warn**，并且 `_mark_fail` 内部
+            #   也不会推计数 —— 也就是"继续重试，不停止同步"。
+            #
+            # 为什么要降级日志级别：`URLError` 打红字会让用户以为同步坏了，
+            # 而实际上它下一轮自己就好了。红字应该留给"真的需要你去处理"的事。
+            kind = _error_kind(RuntimeError(err))
+            if kind == "fatal":
+                self.store.log(f"同步失败：{err}", "error")
+                self._mark_fail(err, fatal=True)
+            else:
+                self.store.log(
+                    f"同步失败（非致命，**不会停止自动同步**，下一轮继续重试）："
+                    f"{err}", "warn")
+                self._mark_fail(err, fatal=False)
         return summary
 
     # ------------------------------------------------------------ 列表局部更新
@@ -1537,11 +1744,27 @@ class SyncEngine:
 
         **写库是有节制的**：同步每 5 秒一轮，如果每轮都无条件写两三次 meta，
         磁盘就在做完全无谓的活。所以只在值真的变了的时候写。
+
+        ★ 另外还负责**从"暂停"状态里恢复**（见 PROBE_INTERVAL_SEC 的说明）：
+        走到这里说明这一轮真的通了，那就该把自动同步放回去 ——
+        不管这一轮是定时探测触发的，还是用户手点了一下「立即同步」。
+        用户重新登录完、或者网络自己好了，服务都该自己接着跑。
         """
         now = int(time.time())
         if self.fail_streak:
             self.fail_streak = 0
             self.store.set_meta("fail_streak", "0")
+        # ★ 从暂停中恢复。
+        #   判定依据是 meta 里的 `paused_at` —— 而不是"auto_sync 是不是 False"：
+        #   用户可能本来就**故意关着**自动同步（有意设计，不是故障），
+        #   那种情况绝不能因为我们跑通了一轮就擅自给他打开。
+        #   只有"是被自动暂停的"才自动恢复。
+        if str(self.store.get_meta("paused_at", "") or "").strip():
+            self._resume_auto_sync()
+        else:
+            # 没被暂停过，但可能留着一条忘记删的提示（例如写提示时崩了）——
+            # 顺手清掉，别让它一直占着用户的笔记列表。
+            self.remove_pause_hint(quiet=True)
         try:
             prev = int(self.store.get_meta("last_ok_at", "0") or 0)
         except (TypeError, ValueError):
@@ -1552,28 +1775,257 @@ class SyncEngine:
         if not (self.store.get_meta("ok_since", "") or "").strip():
             self.store.set_meta("ok_since", str(now))
 
-    def _mark_fail(self, err: str = "") -> None:
-        """本轮失败：累加计数，到阈值就自动关掉自动同步。
+    def _resume_auto_sync(self) -> None:
+        """从"自动暂停"里恢复：重新打开开关、清掉暂停痕迹、删掉提示笔记。
 
-        关掉之后把控制权交回给人 —— 既不会刷屏，也不会拿着坏凭据空转。
+        只在**确实被暂停过**（`paused_at` 有值）时调用 —— 见 `_mark_ok` 的说明。
         """
-        self.fail_streak += 1
+        self.store.set_meta("paused_at", "")
+        self.store.set_meta("pause_hint_pending", "")
+        self.store.set_meta("pause_hint_ts", "")
+        if not self.store.cfg.get("auto_sync"):
+            self.store.cfg["auto_sync"] = True
+            self.store.save_config()
+            self.store.log(
+                "链路已恢复 —— 自动同步**已自动重新打开**（之前是连续失败被暂停的）。")
+        # 通知笔记必须跟着删掉。
+        # 忘了删的后果很具体：用户的备忘录里会一直挂着一条"同步已停止"，
+        # 而实际上同步跑得好好的 —— 这种"狼来了"比不通知更糟。
+        self.remove_pause_hint()
+        self.fail_streak = 0
+        self.store.set_meta("fail_streak", "0")
+
+    def _pause_probe_due(self, now: int | None = None) -> bool:
+        """暂停状态下，现在该不该做一次探测？
+
+        节流依据是 meta 的 `paused_at`（而不是内存变量）——
+        这样**服务重启后仍然从上次探测的时间点算起**，
+        不会因为重启就把 5 分钟节流重置成"立刻探测"。
+        """
+        now = int(time.time()) if now is None else int(now)
+        try:
+            at = int(self.store.get_meta("paused_at", "0") or 0)
+        except (TypeError, ValueError):
+            at = 0
+        if at <= 0:
+            return False
+        return now - at >= PROBE_INTERVAL_SEC
+
+    def note_pause_probe_failed(self, err: str = "") -> None:
+        """探测又失败了：把下一次探测时间点往后推，**其他什么都不做**。
+
+        ★ 特别**不推 fail_streak**。
+        这一点很关键：如果探测失败也累加计数，那 fail_streak 会一路涨上去，
+        以后任何一次"够到阈值"的判断都会立刻命中 —— 等于这个开关再也回不来了。
+        探测是"看看好了没"，不是"又一次同步尝试"。
+        """
+        self.store.set_meta("paused_at", str(int(time.time())))
+        if err:
+            self.store.set_meta("last_fail_msg", str(err)[:300])
+
+    def _mark_fail(self, err: str = "", fatal: bool | None = None) -> None:
+        """本轮失败。
+
+        ★★★ 核心规则（用户明确要求）：
+            非致命错误 → **继续重试，不停止同步**
+            致命错误   → 才累加计数、才暂停、才写提示笔记
+
+        `fatal` 可以显式传入（调用方已经判过），不传就自己判（见 `_error_kind`）。
+        """
+        if fatal is None:
+            fatal = _is_fatal_error(RuntimeError(err or ""))
+
         now = int(time.time())
-        self.store.set_meta("fail_streak", str(self.fail_streak))
         self.store.set_meta("last_fail_at", str(now))
         self.store.set_meta("last_fail_msg", (err or "")[:300])
         # 一旦失败，"连续可用"的计时就归零重来
         self.store.set_meta("ok_since", "")
 
+        if not fatal:
+            # ★★ 非致命：**只记一笔，别的什么都不做**。
+            #    不推 fail_streak、不暂停、不写提示笔记。
+            #    它下一轮自己就会重试 —— 这正是用户要的"继续重试"。
+            self.store.log(
+                f"同步遇到非致命错误，**不会停止自动同步**，下一轮继续重试：{err}",
+                "warn")
+            return
+
+        # ---- 以下都是致命错误：确实是"重试也没用、要人处理"了 ----
+        self.fail_streak += 1
+        self.store.set_meta("fail_streak", str(self.fail_streak))
+
         if self.fail_streak >= FAIL_STREAK_LIMIT and self.store.cfg.get("auto_sync"):
             interval = self.store.cfg.get("sync_interval_sec") or 5
             self.store.cfg["auto_sync"] = False
             self.store.save_config()
+            # 暂停时刻 = 探测节流的起点
+            self.store.set_meta("paused_at", str(now))
+            self.store.set_meta("pause_hint_pending", "1")
             self.store.log(
-                f"已连续 {self.fail_streak} 轮同步失败，自动同步已自动暂停"
+                f"已连续 {self.fail_streak} 轮遇到**致命错误**，自动同步已暂停"
                 f"（否则会每 {interval} 秒往日志里写一条同样的错误，"
-                "把有用信息淹掉）。问题修好后，手动把开关重新打开即可。",
-                "error")
+                f"把有用信息淹掉）。**不会一直停着** —— "
+                f"后台每 {max(1, PROBE_INTERVAL_SEC // 60)} 分钟探测一次，"
+                f"问题解决后自动重新打开；也可以手动点开关立刻重试。"
+                f"原因：{err}", "error")
+            # 往两侧各写一条**提示笔记**，让用户在手机的笔记 App 里就能看到。
+            # 放在最后：它要发起写请求，失败也只告警，不能影响暂停本身。
+            self.publish_pause_hint(err)
+        else:
+            self.store.log(
+                f"同步失败（致命，第 {self.fail_streak}/{FAIL_STREAK_LIMIT} 轮）："
+                f"{err}", "error")
+
+    # ---------------------------------------------------- 暂停提示「通知笔记」
+    #
+    # 设计取舍（都是踩过或想清楚了才写下来的）：
+    #
+    # 1. **靠正文标记认领，不靠 id。**
+    #    记 id 要维护"提示笔记现在叫什么"的状态；状态一丢（清映射表、
+    #    换备份、数据库回滚）就再也删不掉，用户会看到重复提示越积越多。
+    #    用正文里的 `PAUSE_HINT_MARK` 则任何时候都能重新找到它。
+    #
+    # 2. **绝不参与同步。**
+    #    写完之后立刻把它**排除在两侧快照之外**（见 `_hint_filtered`），
+    #    否则下一轮的"未关联条目"循环会把它当成新笔记建到对面去，
+    #    用户的便笺里就会凭空多出一条内容诡异的记录。
+    #
+    # 3. **失败只告警。**
+    #    写提示本身要发请求；如果它也抛异常，就会把 `_mark_fail` 搅乱 ——
+    #    而"暂停"这件事必须在任何情况下都成立。
+
+    def _hint_text(self, err: str = "") -> str:
+        """提示笔记的正文。
+
+        写成用户**能照着做**的样子，而不是贴一段异常栈：
+        看到这条的人多半是在手机上翻笔记，他需要知道"现在是什么情况"
+        和"我该干什么"，不需要知道 `URLError` 是什么。
+        """
+        import datetime as _dt
+        ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        last = (err or self.store.get_meta("last_fail_msg", "") or "").strip()
+        n = self.fail_streak
+        lines = [
+            PAUSE_HINT_TITLE,
+            "",
+            f"时间：{ts}",
+            f"原因：连续 {n} 轮遇到需要处理的错误，已暂停自动同步"
+            f"（避免反复失败刷爆日志）。",
+        ]
+        if last:
+            lines += ["", f"最后一轮的错误：{last[:200]}"]
+        lines += [
+            "",
+            "服务会自己每 "
+            f"{max(1, PROBE_INTERVAL_SEC // 60)} 分钟重试一次，"
+            "通了就自动恢复，并删掉这条提示。",
+            "",
+            "如果长时间没有恢复，可以：",
+            "1. 打开同步服务的网页，看日志里的具体错误；",
+            "2. 常见原因是服务器到微软的链路抖动，等一会儿通常自己就好；",
+            "3. 重新登录（两端的登录都可能过期）。",
+            "",
+            "—— 这条提示由 sticky-mi-sync 写入，服务恢复后会自动删除，",
+            "不用手动处理。",
+            "",
+            PAUSE_HINT_MARK,
+        ]
+        return "\n".join(lines)
+
+    def _hint_side_writable(self, side: str) -> bool:
+        """这一侧现在能不能写（不能写就别去试，省一次无谓的失败）。"""
+        if side == "xiaomi":
+            return self._xiaomi_writable()
+        return True
+
+    def _find_pause_hint(self, side: str) -> dict | None:
+        """在某一侧找现有的提示笔记（按正文标记认领，不看 id）。"""
+        try:
+            notes = (self.graph.list_notes() if side == "graph"
+                     else self.xiaomi.list_notes())
+        except Exception:
+            return None
+        for n in notes or []:
+            if PAUSE_HINT_MARK in (n.get("text") or ""):
+                return n
+        return None
+
+    def publish_pause_hint(self, err: str = "") -> None:
+        """往两侧各写一条提示笔记。已存在则**原地更新**（不重复写）。"""
+        # 节流：`_mark_fail` 在暂停后可能被别的路径再调一次，
+        # 每 5 分钟最多写一次，免得提示笔记被反复重写。
+        try:
+            last = int(self.store.get_meta("pause_hint_ts", "0") or 0)
+        except (TypeError, ValueError):
+            last = 0
+        if last and int(time.time()) - last < PROBE_INTERVAL_SEC:
+            return
+        text = self._hint_text(err)
+        wrote = []
+        for side in ("graph", "xiaomi"):
+            if not self._hint_side_writable(side):
+                continue
+            label = SIDE_LABEL.get(side, side)
+            try:
+                cur = self._find_pause_hint(side)
+                if cur:
+                    self._hint_update(side, cur, text)
+                else:
+                    self._hint_create(side, text)
+                wrote.append(label)
+            except Exception as e:      # 写不进去不能影响"暂停"本身
+                self.store.log(
+                    f"写入暂停提示到{label}失败（不影响暂停状态）："
+                    f"{type(e).__name__}: {e}", "warn")
+        if wrote:
+            self.store.set_meta("pause_hint_pending", "")
+            self.store.set_meta("pause_hint_ts", str(int(time.time())))
+            self.store.log(
+                f"已在{'、'.join(wrote)}里写入一条「{PAUSE_HINT_TITLE}」提示 —— "
+                f"服务恢复后会自动删除")
+
+    def _hint_create(self, side: str, text: str) -> None:
+        if side == "graph":
+            r = self.graph.create_note(text)
+            self.dropped_hint_ids.add(str(r.get("id") or ""))
+        else:
+            r = self.xiaomi.create_note(text, self._folder_id())
+            self.dropped_hint_ids.add(str(r.get("id") or ""))
+
+    def _hint_update(self, side: str, cur: dict, text: str) -> None:
+        nid = str(cur.get("id") or "")
+        if not nid:
+            return
+        if side == "graph":
+            self.graph.update_note(nid, text, cur.get("change_key") or "")
+        else:
+            self.xiaomi.update_note(nid, text)
+        self.dropped_hint_ids.add(nid)
+
+    def remove_pause_hint(self, quiet: bool = False) -> None:
+        """删掉两侧的提示笔记。**不存在就什么都不做**（幂等）。"""
+        removed = []
+        for side in ("graph", "xiaomi"):
+            if not self._hint_side_writable(side):
+                continue
+            label = SIDE_LABEL.get(side, side)
+            try:
+                cur = self._find_pause_hint(side)
+                if not cur:
+                    continue
+                nid = str(cur.get("id") or "")
+                # 先登记再删：删成功与否，这一轮都不该把它当成"用户新建的"。
+                if nid:
+                    self.dropped_hint_ids.add(nid)
+                if side == "graph":
+                    self.graph.delete_note(nid)
+                else:
+                    self.xiaomi.delete_note(nid)
+                removed.append(label)
+            except Exception as e:
+                self.store.log(f"删除{label}的暂停提示失败：{e}", "warn")
+        if removed and not quiet:
+            self.store.log(f"已删除{'、'.join(removed)}里的暂停提示")
 
     def health(self) -> dict[str, Any]:
         """凭据健康档案 —— 专门用来回答"登录到底能撑多久"。
@@ -1652,6 +2104,25 @@ class SyncEngine:
             xiaomi_status = self.xiaomi.status()
         except Exception as e:
             xiaomi_status = {"mode": "?", "connected": False, "error": str(e)}
+
+        # ★ 是不是"被自动暂停"了？判据是 meta 的 `paused_at`（不是 auto_sync 为假）——
+        #   用户自己关的开关不该被说成"服务停了"（那是有意设计）。
+        #   前端据此把状态显示成"已暂停 · Ns 后自动重试"，而不是一句干巴巴的"已关闭"。
+        paused = {}
+        raw_paused = str(self.store.get_meta("paused_at", "") or "").strip()
+        if raw_paused:
+            try:
+                at = int(raw_paused)
+            except (TypeError, ValueError):
+                at = 0
+            if at:
+                paused = {
+                    "at": at,
+                    "every_sec": PROBE_INTERVAL_SEC,
+                    "next_probe_at": at + PROBE_INTERVAL_SEC,
+                    "reason": (self.store.get_meta("last_fail_msg", "") or "")[:200],
+                }
+
         return {
             "graph": graph_status,
             "xiaomi": xiaomi_status,
@@ -1663,6 +2134,8 @@ class SyncEngine:
             # 有断点没跑完（上次中止过）—— 前端可以提示"点同步会接着跑"
             "resume_pending": len(self._load_done()),
             "auto_sync": bool(self.store.cfg.get("auto_sync")),
+            # 自动暂停信息（空 dict = 没被暂停）
+            "paused": paused,
             "readiness": self.readiness(),
             "health": self.health(),
             "last_result": self.last_result,

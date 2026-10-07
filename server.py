@@ -590,22 +590,71 @@ def pair_selected(store, engine, keys: list[str]) -> dict[str, Any]:
 def sync_loop():
     """后台同步循环。
 
-    只做两件事：看配置决定要不要跑、跑了就把下次时间点往后推。
-    **开关关闭时完全不动作** —— 不登录、不读接口、不写任何东西，
-    这样"没打开同步"就是一个真正安静的状态。
+    三种状态，各自该干什么说清楚：
+
+      1. **开关开着**（正常）—— 每 `sync_interval_sec` 秒跑一轮完整同步。
+      2. **被自动暂停**（连续失败 3 轮）—— **不是完全不动**。
+         原来这里是彻底静默的，于是链路自己好了也没人知道，
+         用户得自己发现"今天一整天没同步"再去点开关（实测被这么反馈过）。
+         现在每 `PROBE_INTERVAL_SEC`（5 分钟）做一次**只读探测**：
+         通了就自动把开关打开、把提示笔记删掉；没通就把下次探测时间往后推。
+      3. **开关关着**（用户自己关的，或还没登录）—— 真正什么都不做。
+         不登录、不读接口、不写任何东西，这就是"没打开同步"该有的安静状态。
+         注意 ② 和 ③ 的区别：② 是**服务自己停的**，要自己爬回来；
+         ③ 是**用户主动关的**，绝不能去动它（见 `_resume_auto_sync`）。
     """
     store: Store = RUNTIME["store"]
+    engine = RUNTIME["engine"]
     while not RUNTIME["stop"].is_set():
         cfg = store.cfg
         on = bool(cfg.get("auto_sync"))
         interval = max(1, int(cfg.get("sync_interval_sec") or 5))
-        RUNTIME["next_sync_at"] = time.time() + interval if on else 0
+
+        # 被自动暂停了吗？判据是 meta 里的 `paused_at`（不是"auto_sync 为假"）
+        paused_at = 0
+        try:
+            paused_at = int(store.get_meta("paused_at", "0") or 0)
+        except (TypeError, ValueError):
+            paused_at = 0
+
         if on:
+            RUNTIME["next_sync_at"] = time.time() + interval
+            RUNTIME["next_probe_at"] = 0
             try:
-                RUNTIME["engine"].run_once(source="auto")
+                engine.run_once(source="auto")
             except Exception as e:  # 兜底：循环绝不能死
                 store.log(f"同步循环异常：{type(e).__name__}: {e}", "error")
-        # 用可中断的等待，方便改配置后尽快生效
+            RUNTIME["stop"].wait(interval)
+            continue
+
+        if paused_at:
+            # ② 自动暂停中 —— 长间隔只读探测
+            probe_interval = max(60, int(getattr(engine, "PROBE_INTERVAL_SEC", 300)))
+            RUNTIME["next_sync_at"] = 0
+            RUNTIME["next_probe_at"] = paused_at + probe_interval
+            if engine._pause_probe_due():
+                try:
+                    res = engine.fetch_only(source="probe")
+                    if res.get("ok"):
+                        # 通了 —— `fetch_only` 内部已经调过 `_mark_ok`，
+                        # 那里负责把 auto_sync 打开并删掉提示笔记。
+                        # 这一轮就不要再等 5 分钟了，立刻接着跑正式同步。
+                        continue
+                    engine.note_pause_probe_failed(
+                        "；".join(res.get("errors") or [])[:200])
+                    store.log("暂停中探测：链路仍不通，稍后再试", "info")
+                except Exception as e:
+                    engine.note_pause_probe_failed(f"{type(e).__name__}: {e}")
+                    store.log(f"暂停中探测异常：{type(e).__name__}: {e}", "warn")
+            # 等到该探测的时刻；用 min 免得改配置后要等满一次旧间隔
+            wait = max(1, min(probe_interval,
+                              int(RUNTIME["next_probe_at"] - time.time()) or 1))
+            RUNTIME["stop"].wait(wait)
+            continue
+
+        # ③ 用户自己关着 —— 真正安静
+        RUNTIME["next_sync_at"] = 0
+        RUNTIME["next_probe_at"] = 0
         RUNTIME["stop"].wait(interval)
 
 

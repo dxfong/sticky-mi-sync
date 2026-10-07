@@ -831,6 +831,19 @@ function renderSwitch(st){
     b.disabled = true;
     b.classList.remove("primary");
     b.title = "已请求中止 —— 会把当前这条处理完再停，已完成的动作不回滚";
+  } else if (!on && st.paused && st.paused.at) {
+    // ★ 被服务**自动暂停**了（连续遇致命错误）。
+    //   必须和"用户自己关的"区分开显示 —— 否则用户会以为是自己忘开了，
+    //   或者更糟：以为同步坏了但找不到原因。这里直接把原因和"会自动重试"写上。
+    b.textContent = "已暂停 · 恢复";
+    b.disabled = !rd.ready;
+    b.classList.remove("primary");
+    const left = Math.max(0, Math.round((st.paused.next_probe_at || 0) - (st.now || 0)));
+    b.title = "自动同步被服务自己暂停了（连续遇到需要处理的错误）。\n"
+      + "原因：" + (st.paused.reason || "（见日志）") + "\n"
+      + "后台每 " + Math.round((st.paused.every_sec || 300) / 60)
+      + " 分钟自动重试一次，通了会自己恢复并删掉笔记里的提示。\n"
+      + "也可以点一下这个按钮立刻恢复。";
   } else if (!on) {
     b.textContent = "自动同步：关";
     b.disabled = !rd.ready;            // 打开前必须两端登录 + 选定文件夹
@@ -858,6 +871,8 @@ function renderSwitch(st){
   const cd = td((st.next_sync_at || 0) - (st.now || 0));
   $("autoStatus").textContent = busy ? " · 同步中…"
     : st.resume_pending ? " · 有断点待续"
+    : (!on && st.paused && st.paused.at) ?
+      " · 已暂停 · " + td((st.paused.next_probe_at || 0) - (st.now || 0)) + " 后自动重试"
     : on ? ` · 运行中 · 下次同步 ${cd}`
     : (rd.ready ? " · 可以打开" : " · 尚不可用");
   $("readyBox").innerHTML = rd.ready

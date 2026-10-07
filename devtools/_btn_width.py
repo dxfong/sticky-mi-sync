@@ -18,8 +18,9 @@ HIDE_ERR = """() => {
   });
 }"""
 
-# 四种真实文案（见 renderSwitch）
-CASES = ["自动同步：关", "自动同步：开", "中止本轮", "正在中止…"]
+# 五种真实文案（见 renderSwitch）。「已暂停 · 点此恢复」是 2026-10-08 新增的
+# —— 它是所有文案里**最长**的一条，所以必须一起量，否则定宽就白做了。
+CASES = ["自动同步：关", "自动同步：开", "中止本轮", "正在中止…", "已暂停 · 恢复"]
 
 with sync_playwright() as p:
     b = p.chromium.launch(channel="msedge", headless=True)
