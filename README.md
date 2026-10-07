@@ -42,14 +42,33 @@
 
 ```mermaid
 flowchart LR
-    W["Windows<br/>便笺"] <--> MS["微软便笺云端<br/>（Exchange 笔记）"]
-    N["iPhone / iPad / Mac<br/>备忘录"] <-->|"加 hotmail 账号"| MS
-    MS <--> SV["sticky-mi-sync<br/>（你的 NAS / 软路由）"]
-    SV <--> MI["小米笔记云端"]
-    MI <--> M["Android<br/>小米笔记"]
+    W["Windows 便笺"]
+    N["iPhone / iPad / Mac 备忘录"]
+    M["Android 小米笔记"]
+    MS["微软便笺云端（Exchange 笔记）"]
+    SV["sticky-mi-sync（你的 NAS / 软路由）"]
+    MI["小米笔记云端"]
+
+    W -->|双向同步| MS
+    N -->|加 hotmail 账号| MS
+    MS --> SV
+    SV --> MI
+    MI --> M
 ```
 
 **于是三端全部连上**：在哪台设备上随手记一笔，**其它设备上都能看到**。
+
+> **图中箭头只表示走向，实际每一段都是双向的。** 三段关系分别是：
+> ① Windows 便笺 ⇄ 微软云端（便笺 App 自己就在同步）；
+> ② Apple 备忘录 ⇄ 微软云端（加一次 hotmail 账号即可，**本服务不参与**）；
+> ③ 微软云端 ⇄ 小米云端（**由本服务双向桥接**）。
+>
+> 图用 Mermaid 画（GitHub 直接渲染）。这里刻意**只用最基础的 `-->` 语法** ——
+> 双向箭头 `<-->` 在 GitHub 的 Mermaid 版本上会报 `Unable to render rich display`。
+> 每行一条语句、节点标签不用 HTML、边标签不加引号，是兼容性最好的写法。
+>
+> 早先这里是纯字符拼的 ASCII 图，**中西文混排宽度不一致**，经常对不齐 ——
+> 换成 Mermaid 后由渲染器自己排版，不会再歪。
 
 ### 为什么值得这么做
 
