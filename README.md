@@ -22,19 +22,18 @@
 
 ```mermaid
 flowchart LR
-    G["微软便笺<br/>Windows"]
-    S["sticky-mi-sync<br/>（NAS / 软路由 · Docker）"]
-    A["小米笔记<br/>Android"]
+    G["微软便笺<br/>Windows"] <--> S["sticky-mi-sync<br/>（NAS / 软路由 · Docker）"]
+    S <--> A["小米笔记<br/>Android"]
     N["备忘录<br/>macOS · iPhone · iPad"]
-
-    G <--> S
-    S <--> A
-    S <--> N
 ```
 
-> 上图用 Mermaid 画（GitHub / GitLab / Gitee / VS Code 都能直接渲染）。
-> 早先这里是一张纯字符拼的 ASCII 图，**中西文混排在不同渲染器里宽度不一致**，
-> 经常对不齐 —— 换成 Mermaid 后由渲染器自己排版，不会再歪。
+> 同步链路就是上面**两端双向**：微软便笺（Windows）⇄ 小米笔记（Android）。
+> 右侧那个「备忘录」是 macOS / iPhone / iPad 上用的**系统原生 App** ——
+> 属于"各端用哪个 App"的使用方式说明，**不在这条链路上**。
+>
+> 图用 Mermaid 画（GitHub / GitLab / Gitee / VS Code 直接渲染）。
+> 早先这里是纯字符拼的 ASCII 图，**中西文混排宽度不一致**，经常对不齐 ——
+> 换成 Mermaid 后由渲染器自己排版，不会再歪。
 
 **特性**：
 
