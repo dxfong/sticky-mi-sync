@@ -34,6 +34,7 @@ import hashlib
 import json
 import re
 import time
+import urllib.error
 from typing import Any
 
 from .textutil import content_hash, first_line
@@ -64,6 +65,37 @@ FAIL_STREAK_LIMIT = 3
 
 # 日志里给两侧起的中文名（"拉取微软便笺列表：165 条"比 "graph: 165" 好读）
 SIDE_LABEL = {"graph": "微软便笺", "xiaomi": "小米笔记"}
+
+
+# ---------------------------------------------------------------- 网络抖动重试
+# 服务器到微软的链路实测抖动剧烈（同一域名耗时 0.7 ~ 5.9 秒，波动 8 倍），
+# 偶发 `URLError: [SSL: UNEXPECTED_EOF_WHILE_READING]` ——
+# 实测**一小时里出现 7 次，全部断在"拉列表"这一步**（小米侧 0.36 秒，稳如磐石）。
+#
+# 这类瞬时错误重试一次基本都能过。不重试的代价不只是白跑一轮：
+# 每失败一次 `fail_streak` +1，连 3 轮就把自动同步**自己暂停**了 ——
+# 而暂停恰恰解决不了网络抖动，只会让用户以为同步坏了。
+#
+# 只认**连接层**错误。刻意排除 `urllib.error.HTTPError`：它虽然是 URLError
+# 的子类，但那是服务端明确回了一个状态码（401/403/404…），重试同一个请求
+# 没有任何意义，只会拖慢真正该做的事。
+TRANSIENT_NET_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError)
+PULL_RETRY_TIMES = 1          # 再试几次
+PULL_RETRY_WAIT = 2.0         # 每次之间等多久（秒）
+
+
+def _is_transient_net_error(e: BaseException) -> bool:
+    """判断是不是「重试一下可能就好了」的网络错误。"""
+    if isinstance(e, urllib.error.HTTPError):
+        return False                      # 服务端已明确作答，不是抖动
+    if isinstance(e, QuotaExceeded):
+        return False                      # 小米写配额，重试只会更糟
+    if isinstance(e, TRANSIENT_NET_ERRORS):
+        return True
+    cause = getattr(e, "__cause__", None)
+    if cause is not None and cause is not e:
+        return _is_transient_net_error(cause)
+    return False
 
 
 # ---------------------------------------------------------------- 时间转换
@@ -307,6 +339,33 @@ class SyncEngine:
             h.update(b"\n")
         return h.hexdigest()[:16]
 
+    def _pull_list(self, side: str, fn, **kw):
+        """拉一侧的完整列表，**瞬时网络错误自动重试一次**。
+
+        为什么值得单独抽出来：`URLError: [SSL: UNEXPECTED_EOF_WHILE_READING]`
+        实测一小时出现 7 次、全部发生在这一步，重试一次基本都能过。
+
+        重试仍失败时**把侧别写进异常消息**：原来日志只有
+        `同步失败：URLError: ...`，看不出是微软还是小米断的，排查只能靠猜。
+        """
+        label = SIDE_LABEL.get(side, side)
+        last: BaseException | None = None
+        for i in range(PULL_RETRY_TIMES + 1):
+            try:
+                return fn(**kw)
+            except Exception as e:              # noqa: BLE001 — 要分拣，不能一律抛
+                if not _is_transient_net_error(e):
+                    raise                       # 业务错误（401/配额/解析）直接上抛
+                last = e
+                if i < PULL_RETRY_TIMES:
+                    self.store.log(
+                        f"拉取{label}列表遇到网络抖动（{type(e).__name__}），"
+                        f"{PULL_RETRY_WAIT:g} 秒后重试…", "warn")
+                    time.sleep(PULL_RETRY_WAIT)
+        raise RuntimeError(
+            f"拉取{label}列表失败（已重试 {PULL_RETRY_TIMES} 次）："
+            f"{type(last).__name__}: {last}") from last
+
     def note_pull(self, source: str, g_all: list, m_all: list,
                   partial: str = "") -> None:
         """把"拉了一次列表"记进日志。
@@ -520,9 +579,14 @@ class SyncEngine:
                         f"（**不新建、不删除**）")
             else:
                 mp = 1 if limit_n else None
-                g_all = [n for n in self.graph.list_notes(max_pages=mp)
+                # 走 _pull_list（不是直接调 list_notes）：
+                # 瞬时网络抖动自动重试一次；重试仍失败时，异常消息里会写明
+                # 是「微软便笺」还是「小米笔记」断的 —— 否则日志只有一句
+                # `同步失败：URLError: ...`，排查只能靠猜。
+                g_all = [n for n in self._pull_list("graph", self.graph.list_notes,
+                                                    max_pages=mp)
                          if not n.get("deleted")]
-                m_all = [n for n in self.xiaomi.list_notes()
+                m_all = [n for n in self._pull_list("xiaomi", self.xiaomi.list_notes)
                          if not n.get("deleted")]
 
             # ★★★ 在**截断处**按时间倒序排，不依赖各 provider 的实现。★★★
