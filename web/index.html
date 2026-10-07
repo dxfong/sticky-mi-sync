@@ -33,6 +33,13 @@
   button:hover{border-color:#4a504d}
   button.primary{background:var(--accent);color:#06231a;border-color:var(--accent);font-weight:500}
   button:disabled{opacity:.45;cursor:default}
+  /* 同步开关按钮**定宽**。
+     它的文案会在「自动同步：关/开」⇄「中止本轮」⇄「正在中止…」之间
+     随后台忙闲自动切换，四种文案实测宽度 114 / 86 / 100 px ——
+     按钮一窄，同一行左边的「就绪提示」就被往右推 28px（Playwright 实测）。
+     定宽后外框不动，只有字在变；文案将来变长也只是撑开，不会更糟。
+     min-width 而非 width：极端情况下宁可撑开，也不截断文字。 */
+  #btnAuto{min-width:114px;text-align:center}
   input,select,textarea{background:var(--panel2);color:var(--text);
     border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:13px;
     font-family:inherit}
