@@ -174,17 +174,20 @@
   <div class="flexsp">
     <div>
       <h1>便笺 ⇄ 小米笔记 同步器</h1>
-      <div class="sub" id="subline">加载中…</div>
+      <!-- 副标题行 = 映射计数 + 同步状态（状态原本在右侧按钮那一行）。
+           ★ 为什么要挪到这里：倒计时的值在 "3s"/"10s"/"–" 之间变，
+             只要它和按钮**在同一行**，宽度一变就会把按钮推来推去
+             （上一版试过给它定宽，没用 —— 推人的是整行宽度的变化，不是那一格）。
+             挪进左栏后，右栏由 .flexsp 的 space-between 贴住右边缘，
+             左栏宽度怎么变都只吃掉中间的空隙，按钮一动不动。
+             状态整体收进**一个** #autoStatus，连左栏自己也不会左右跳。 -->
+      <div class="sub">
+        <span id="subline">加载中…</span>
+        <span class="kv" id="autoStatus"
+              style="display:inline-block;min-width:12em;white-space:nowrap"></span>
+      </div>
     </div>
     <div class="row">
-      <!-- 左侧：状态文字（跟标题一起，不跟右边抢位置） -->
-      <span class="kv" id="autoHint"></span>
-      <!-- 倒计时给个**固定宽度**（inline-block + min-width）：
-           它的值会在 "3s" / "10s" / "–" 之间变，宽度一变就把同行元素挤动，
-           右侧按钮跟着抖。定宽之后数字只是在本格内变，不再影响排版。 -->
-      <span class="kv">下次同步 <b id="countdown"
-            style="display:inline-block;min-width:3em;text-align:left">–</b></span>
-      <span class="kv" id="syncProg"></span>
       <span style="flex:1"></span>
       <!-- 右侧，从右往左依次：
              ① 自动同步开关（**与中止功能已合并成一个按钮** ——
@@ -527,34 +530,26 @@ async function refresh(){
   lastState = st;
 
   const g = st.graph || {}, x = st.xiaomi || {};
+  // 副标题只管"数据规模"（映射数 / 冲突数）。
+  // 「同步中…」「有断点待续」「运行中 · 下次同步 Ns」这些**状态**
+  // 统一由 renderSwitch 写进同一个 #autoStatus —— 两处都写会重复，
+  // 也会让两处各自的宽度变化叠加成抖动。
   $("subline").textContent =
     `已建立映射 ${st.counts.links} 条` +
-    (st.counts.conflicts ? ` · 冲突 ${st.counts.conflicts}` : "") +
-    (st.busy ? " · 同步中…" : "");
-  $("countdown").textContent = td((st.next_sync_at||0) - (st.now||0));
+    (st.counts.conflicts ? ` · 冲突 ${st.counts.conflicts}` : "");
 
-  // 同步进度。
-  // **中止已与自动同步按钮合并**（一个按钮，动作由状态决定）——
-  // 所以这里不再单独操作中止按钮；见 renderSwitch 与 btnAuto.onclick。
+  // 同步状态（同步中… / 有断点待续 / 运行中 · 下次同步 Ns）统一在
+  // renderSwitch() 里写进副标题行的 #autoStatus —— 不再散落在多个元素上。
+  // **中止已与自动同步按钮合并**（一个按钮，动作由状态决定），
+  // 所以这里也不单独操作中止按钮；见 renderSwitch 与 btnAuto.onclick。
   //
-  // ★ 刻意**不显示 "进度 328/492" 这种跳动数字**：
+  // ★ 仍然刻意**不显示 "进度 328/492" 这种跳动数字**：
   //   · 对用户没有意义 —— 那个 total 是"本轮要检查多少条"，
   //     不是"有多少条笔记"，数字本身解释不清楚；
-  //   · 更实际的问题是**每次刷新数字长度都在变**（49→147→245…），
-  //     把同一行的其它元素挤来挤去，右侧按钮位置跟着抖（用户实测反馈）。
-  //   真要知道有没有在跑，"同步中…" 这一个词就够了（而且它宽度固定）。
-  const pr = st.progress || {};
-  const running = !!st.busy;
-  if (running) {
-    $("syncProg").textContent = "同步中…";
-  } else if (st.resume_pending) {
-    // 上次中止过、还没跑完 —— 提醒一下点同步是"接着跑"而不是重来。
-    // 这条**保留**：它只在特定时刻出现，且信息是用户真需要的。
-    $("syncProg").textContent = "有断点待续";
-  } else {
-    $("syncProg").textContent = "";
-  }
-  // progress 字段仍留给需要的人（日志 / 调试），只是界面不显示它。
+  //   · 更要命的是**每次刷新数字长度都在变**（49→147→245…），
+  //     会把同一行的其它元素挤来挤去（右侧按钮就是这么开始抖的）。
+  //   真要知道有没有在跑，"同步中…" 这一个词就够了。
+  // progress 字段仍留给需要的人（日志 / 调试），界面不显示它。
 
   dot($("gDot"), g.connected); dot($("xDot"), x.connected);
   renderAcct(g, x);       // 「账号与登录」面板：两端正常就收起，任一端掉线自动弹出
@@ -850,8 +845,14 @@ function renderSwitch(st){
     b.title = "当前：开。点一下关闭自动同步";
   }
 
-  $("autoHint").textContent = on ? "运行中" : (rd.ready ? "可以打开" : "尚不可用");
-  $("countdown").textContent = on ? td((st.next_sync_at || 0) - (st.now || 0)) : "已关闭";
+  // 状态文字统一写进副标题行的 #autoStatus（一个元素、定宽）。
+  // 同时只显示最有用的那一条，优先级：正在跑 > 有断点 > 开关状态。
+  // 关掉时**不再显示"已关闭"** —— 按钮上已经写着"自动同步：关"，重复是噪音。
+  const cd = td((st.next_sync_at || 0) - (st.now || 0));
+  $("autoStatus").textContent = busy ? " · 同步中…"
+    : st.resume_pending ? " · 有断点待续"
+    : on ? ` · 运行中 · 下次同步 ${cd}`
+    : (rd.ready ? " · 可以打开" : " · 尚不可用");
   $("readyBox").innerHTML = rd.ready
     ? '<span style="color:var(--accent)">✓ 两端已登录且已选定文件夹，可以开启自动同步</span>'
     : '开启自动同步前还需要：<b style="color:var(--warn)">'
