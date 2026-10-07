@@ -179,7 +179,11 @@
     <div class="row">
       <!-- 左侧：状态文字（跟标题一起，不跟右边抢位置） -->
       <span class="kv" id="autoHint"></span>
-      <span class="kv">下次同步 <b id="countdown">–</b></span>
+      <!-- 倒计时给个**固定宽度**（inline-block + min-width）：
+           它的值会在 "3s" / "10s" / "–" 之间变，宽度一变就把同行元素挤动，
+           右侧按钮跟着抖。定宽之后数字只是在本格内变，不再影响排版。 -->
+      <span class="kv">下次同步 <b id="countdown"
+            style="display:inline-block;min-width:3em;text-align:left">–</b></span>
       <span class="kv" id="syncProg"></span>
       <span style="flex:1"></span>
       <!-- 右侧，从右往左依次：
@@ -532,16 +536,25 @@ async function refresh(){
   // 同步进度。
   // **中止已与自动同步按钮合并**（一个按钮，动作由状态决定）——
   // 所以这里不再单独操作中止按钮；见 renderSwitch 与 btnAuto.onclick。
+  //
+  // ★ 刻意**不显示 "进度 328/492" 这种跳动数字**：
+  //   · 对用户没有意义 —— 那个 total 是"本轮要检查多少条"，
+  //     不是"有多少条笔记"，数字本身解释不清楚；
+  //   · 更实际的问题是**每次刷新数字长度都在变**（49→147→245…），
+  //     把同一行的其它元素挤来挤去，右侧按钮位置跟着抖（用户实测反馈）。
+  //   真要知道有没有在跑，"同步中…" 这一个词就够了（而且它宽度固定）。
   const pr = st.progress || {};
   const running = !!st.busy;
-  if (running && pr.total) {
-    $("syncProg").textContent = `进度 ${pr.done || 0}/${pr.total}`;
+  if (running) {
+    $("syncProg").textContent = "同步中…";
   } else if (st.resume_pending) {
-    // 上次中止过、还没跑完 —— 提醒一下点同步是"接着跑"而不是重来
-    $("syncProg").textContent = `有断点待续（${st.resume_pending} 条已处理）`;
+    // 上次中止过、还没跑完 —— 提醒一下点同步是"接着跑"而不是重来。
+    // 这条**保留**：它只在特定时刻出现，且信息是用户真需要的。
+    $("syncProg").textContent = "有断点待续";
   } else {
     $("syncProg").textContent = "";
   }
+  // progress 字段仍留给需要的人（日志 / 调试），只是界面不显示它。
 
   dot($("gDot"), g.connected); dot($("xDot"), x.connected);
   renderAcct(g, x);       // 「账号与登录」面板：两端正常就收起，任一端掉线自动弹出
