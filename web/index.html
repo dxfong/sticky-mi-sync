@@ -897,6 +897,13 @@ function renderBanner(g, x){
 function renderSwitch(st){
   const rd = st.readiness || {ready:false, blockers:["状态未知"]};
   const on = !!st.auto_sync;
+  // ★ 后台是否正在跑一轮 —— 只用于副标题的状态文字（" · 同步中…"）。
+  //   **不要再删它**：2026-10-08 删「中止本轮」时顺手删了这个声明，
+  //   但下面第 947 行的状态文字还在用它 → ReferenceError: busy is not defined
+  //   → renderSwitch 抛异常 → 整个 refresh() 中断 →
+  //   **标题之后的所有区域（记录/回收站/日志）全部空着**。
+  //   这个 bug 只在浏览器里才看得见（语法检查过得去，因为 busy 像个全局名）。
+  const busy = !!st.busy;
   const b = $("btnAuto");
 
   // ★ 这个按钮**只是一个开关**（用户要求：不再兼职「中止本轮」）。
