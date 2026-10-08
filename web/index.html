@@ -33,13 +33,37 @@
   button:hover{border-color:#4a504d}
   button.primary{background:var(--accent);color:#06231a;border-color:var(--accent);font-weight:500}
   button:disabled{opacity:.45;cursor:default}
+
+  /* ---------------------------------------------------------------- 顶部按钮组
+     ★★ 为什么要单独做成一个容器（而不是塞在 .row 里）：
+     原来的做法是"标题 + 一堆按钮"全在一个 flex 行里，靠 `flex:1` 的空档撑开。
+     这在宽屏没问题，但窄屏（手机 / 非全屏浏览器）下：
+       · 行被挤得很窄，每个按钮各自折行 → 宽度参差不齐
+       · flex-wrap 换行后左对齐 → 视觉上"按钮歪在右边一列"
+       · 「✓ 两端已登录…」被夹在按钮之间，断成 3 行
+     现在把按钮收进 .actions 独立容器，并让 **每个按钮等宽**。
+
+     ★ 等宽怎么做到"真等宽"（踩过的坑）：
+       用 flex + `min-width` 只能给一个**下限** —— 按钮实际宽度还是各自的内容宽
+       （实测 4 个按钮 110/134/104/114px，差 30px，看着就不齐）。
+       改成 grid 的 `grid-auto-columns:1fr`：**同一列里所有项目共享列宽**，
+       而列宽 = 该列最宽项所需宽度 → 按钮天然等宽，且不浪费空间。
+       这是 grid 和 flex 在这件事上的本质差别。 */
+  .actions{
+    display:grid;
+    grid-auto-flow:column;            /* 宽屏：横着排成一列 */
+    grid-auto-columns:1fr;            /* ★ 同一列共享宽度 → 真等宽 */
+    align-items:center;
+    gap:8px;
+    flex:none;                        /* 别被 .flexsp 压缩 */
+  }
+  .actions > button{width:100%;text-align:center;white-space:nowrap}
+
   /* 同步开关按钮**定宽**。
-     它的文案会在「自动同步：关/开」⇄「中止本轮」⇄「正在中止…」之间
-     随后台忙闲自动切换，四种文案实测宽度 114 / 86 / 100 px ——
-     按钮一窄，同一行左边的「就绪提示」就被往右推 28px（Playwright 实测）。
-     定宽后外框不动，只有字在变；文案将来变长也只是撑开，不会更糟。
-     min-width 而非 width：极端情况下宁可撑开，也不截断文字。 */
-  #btnAuto{min-width:114px;text-align:center}
+     文案只在「自动同步：开」⇄「自动同步：关」之间切换（中止功能已移除），
+     两种文案等宽；但保留下限是为了兜住"已暂停 · 恢复"这条更长的文案 ——
+     实测它比"自动同步：开"宽 26px，不定宽就会把左边两个按钮推走。 */
+  #btnAuto{min-width:114px}
   input,select,textarea{background:var(--panel2);color:var(--text);
     border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:13px;
     font-family:inherit}
@@ -172,6 +196,46 @@
     transition:max-height .25s ease,opacity .18s ease,margin-bottom .25s ease;
     margin-bottom:0}
   #acctPanel.open{opacity:1;pointer-events:auto;margin-bottom:14px}
+
+  /* ---------------------------------------------------------------- 窄屏适配
+     ★ 断点 720px 的依据：手机竖屏（360~430px）和"桌面浏览器拖成半屏"
+     （常见 600~700px）都要吃这套规则；而 1180px 的宽屏不受影响。
+     阈值不取 640 是因为 700px 左右时原来那行已经挤到开始折行了 ——
+     与其等它折得难看，不如提前切成规整的排布。 */
+  @media (max-width:720px){
+    /* 标题列 / 按钮组从"左右并排"变成"上下堆叠" */
+    .flexsp{flex-direction:column;align-items:stretch;gap:12px}
+
+    /* ★★ 按钮组排成**固定 2 列**，整体靠右。
+       为什么用 2 列 grid 而不是"flex + wrap + flex-end"（踩过的坑）：
+       flex 换行是**按内容塞**的，每行几个、剩余多少全看文字宽度 ——
+         实测 4 个按钮会排成"2 个 + 1 个 + 1 个（独占整行）"，
+         而且每行左边缘对不齐，看着就是"歪的"。
+       固定 2 列则行数、列宽都确定：
+         · 4 个按钮 → 正好 2 行 × 2 列，**等宽**（同一列共享列宽）
+         · 最后一格是「自动同步」—— 它在右下角，最顺手的位置
+       整体靠右：用 `width:max-content` + `margin-left:auto`
+       （grid 本身不能"内容宽度 + 靠右"，得让它先收缩到内容宽再 auto 左边距）。
+       `justify-items:stretch` 保证按钮撑满它那一格 → 两列等宽。 */
+    .actions{
+      display:grid;
+      grid-auto-flow:row;
+      grid-template-columns:repeat(2, minmax(0,1fr));   /* 固定 2 列，等宽 */
+      width:max-content;            /* 收缩到内容宽度… */
+      max-width:100%;
+      margin-left:auto;             /* …然后整体靠右 */
+      gap:8px;
+    }
+    /* 手机上按钮大一点，方便点按。等宽由 grid 列宽保证，这里只管内边距。 */
+    .actions > button{
+      width:100%;
+      min-width:0;                  /* 覆盖 #btnAuto 的 114px 下限 */
+      padding:9px 12px;
+      font-size:13px;
+    }
+    #btnAuto{min-width:0;font-size:14px}
+    .wrap{padding:14px}
+  }
 </style>
 </head>
 <body>
@@ -193,17 +257,26 @@
         <span class="kv" id="autoStatus"
               style="display:inline-block;min-width:12em;white-space:nowrap"></span>
       </div>
+      <!-- ★ 就绪提示从**按钮那一列**搬到了这里（标题这一列）。
+           原来它和按钮并排，窄屏下按钮换行时它被挤成一个 4~5 字的窄条
+           （"✓ 两端已登录且已选定文件夹，可以开启自动同步" 在 390px 手机上
+           断成 3 行、右边还紧挨着按钮），看着像按钮的标签。
+           放到标题下方后：它是"说明文字"，在文字列里；按钮是"操作"，
+           在按钮组里 —— 各归各位，窄屏也不会互相挤压。 -->
+      <div class="kv" id="readyBox" style="margin-top:2px"></div>
     </div>
-    <div class="row">
-      <span style="flex:1"></span>
-      <!-- 右侧，从右往左依次：
-             ① 自动同步开关（**与中止功能已合并成一个按钮** ——
-                一个按钮，点下去做什么由当前状态决定：关→开 / 开→关 /
-                正在跑→中止本轮。见 renderSwitch 与 btnAuto.onclick）
+    <!-- ★ 按钮组：独立成一个 flex 容器，与左侧标题列并列。
+         窄屏（<720px，见文件末尾的 @media）时 .flexsp 换成竖排，
+         这个容器整行落下、**靠右对齐** —— 这就是"按钮不在同一行时右对齐"。
+         桌面端仍然靠 space-between 贴在右边缘，外观与从前一致。 -->
+    <div class="actions">
+      <!-- 一行的排列顺序（从左到右）：
+             ① 账号与登录（点一下从上方滑出面板：两端登录状态 + 退出登录）
              ② 只读拉取两端列表
-             ③ 账号与登录（点一下从上方滑出面板：两端登录状态 + 退出登录）
-             ④ 就绪提示（"✓ 两端已登录且已选定文件夹…"） -->
-      <span class="kv" id="readyBox"></span>
+             ③ 按内容配对
+             ④ 自动同步开关
+           ★ 自动同步放在**最右**：它是常用主动作，放最右符合"最后一格是主操作"的
+             习惯，同时让三个次要按钮在左侧聚成一簇，窄屏换行时不会拆散主次。 -->
       <button id="btnAcct" title="账号与登录状态">账号与登录 ▾</button>
       <button id="btnFetch">只读拉取两端列表</button>
       <!-- 两侧各自已有数据时，登录后列表里每条会出现两次、全标「未配对」——
@@ -212,7 +285,15 @@
       <button id="btnPair"
               title="把两侧**内容相同**的笔记关联起来。适用于「以前两边各自有数据，登录后列表里每条都出现两次」。
 纯配对操作：不改正文、不新建、不删除。">按内容配对</button>
-      <button id="btnAuto" style="font-size:14px;padding:6px 14px">自动同步：关</button>
+      <!-- 自动同步是一个**开关**，不再兼职「中止本轮」。
+           ★ 为什么去掉中止功能（用户要求）：
+             开着的时候点它 = 关掉；而"关掉"这一步本身就会置 abort 让本轮停下，
+             再单独做一个「中止本轮」按钮是**同一件事的两种入口**，
+             而且按钮文案在 4 种状态间跳（开/关/中止本轮/正在中止…），
+             宽度一变就推动旁边的元素。
+             现在文案只有「自动同步：开/关」两种，语义单一，也不会再跳。
+             （本轮真有断点没跑完时，副标题会显示"有断点待续"，需要时手动再开即可。） -->
+      <button id="btnAuto">自动同步：关</button>
     </div>
   </div>
 
@@ -532,8 +613,9 @@ async function refresh(){
   catch(e){ if (seq === refreshSeq) showBackendError(e); return; }
   if (seq !== refreshSeq) return;          // 已经有更新的刷新在跑了，丢弃这次
   $("errBanner").style.display = "none";
-  // 存一份最新状态：自动同步按钮是"三态"的，点击时按当前状态决定做什么
-  // （关→开 / 开→关 / 正在跑→中止本轮）；「同步选中」也要看它是否该置灰。
+  // 存一份最新状态：自动同步按钮是"开 / 关 / 已暂停"三态的，
+  // 点击时按当前状态决定做什么（关→开 / 开→关 / 已暂停→恢复）；
+  // 「同步选中」也要看它是否该置灰。
   lastState = st;
 
   const g = st.graph || {}, x = st.xiaomi || {};
@@ -547,8 +629,8 @@ async function refresh(){
 
   // 同步状态（同步中… / 有断点待续 / 运行中 · 下次同步 Ns）统一在
   // renderSwitch() 里写进副标题行的 #autoStatus —— 不再散落在多个元素上。
-  // **中止已与自动同步按钮合并**（一个按钮，动作由状态决定），
-  // 所以这里也不单独操作中止按钮；见 renderSwitch 与 btnAuto.onclick。
+  // 「中止本轮」按钮已删除（用户要求）：自动同步按钮只是一个开关，
+  // 关掉时当前这一轮会自然收尾，覆盖了原本"中止"的需求；见 btnAuto.onclick。
   //
   // ★ 仍然刻意**不显示 "进度 328/492" 这种跳动数字**：
   //   · 对用户没有意义 —— 那个 total 是"本轮要检查多少条"，
@@ -815,30 +897,27 @@ function renderBanner(g, x){
 function renderSwitch(st){
   const rd = st.readiness || {ready:false, blockers:["状态未知"]};
   const on = !!st.auto_sync;
-  const busy = !!st.busy;              // 后台正在跑一轮
-  const aborting = !!st.aborting;      // 已经请求中止、还没停
   const b = $("btnAuto");
 
-  // ★ 一个按钮承担两件事（自动同步开关 + 中止），**动作由当前状态决定**：
-  //     关            → 点一下：开启自动同步
-  //     开 + 空闲      → 点一下：关闭自动同步
-  //     开 + 正在跑    → 点一下：**中止当前这一轮**（自动同步保持开着）
-  //     正在中止       → 置灰，等它停
-  // 为什么合并成一个：中止只在"正在跑"时有意义，做成独立按钮平时一直是灰的、
-  // 占地方又容易误点；而这两种操作的时机天然互斥，放同一个按钮上不会有歧义。
-  if (aborting) {
-    b.textContent = "正在中止…";
-    b.disabled = true;
-    b.classList.remove("primary");
-    b.title = "已请求中止 —— 会把当前这条处理完再停，已完成的动作不回滚";
-  } else if (!on && st.paused && st.paused.at) {
+  // ★ 这个按钮**只是一个开关**（用户要求：不再兼职「中止本轮」）。
+  //
+  // 为什么删掉中止功能：开着的时候点它 = 关掉，而"关掉"本身就会置外
+  // 让本轮停下 —— 再单独做一个「中止本轮」等于**同一件事两个入口**。
+  // 而且原来的文案在 4 种状态间跳（自动同步：关 / 开 / 中止本轮 /
+  // 正在中止…），宽度一变就把旁边的按钮推来推去（实测推动 26px）。
+  // 现在文案只剩两种，语义单一，也不会再跳。
+  //
+  // 三种状态，按"有没有被自动暂停"优先：
+  //     被自动暂停   → 「已暂停 · 恢复」（点一下恢复，并说明原因）
+  //     关           → 「自动同步：关」
+  //     开           → 「自动同步：开」
+  if (!on && st.paused && st.paused.at) {
     // ★ 被服务**自动暂停**了（连续遇致命错误）。
     //   必须和"用户自己关的"区分开显示 —— 否则用户会以为是自己忘开了，
     //   或者更糟：以为同步坏了但找不到原因。这里直接把原因和"会自动重试"写上。
     b.textContent = "已暂停 · 恢复";
     b.disabled = !rd.ready;
     b.classList.remove("primary");
-    const left = Math.max(0, Math.round((st.paused.next_probe_at || 0) - (st.now || 0)));
     b.title = "自动同步被服务自己暂停了（连续遇到需要处理的错误）。\n"
       + "原因：" + (st.paused.reason || "（见日志）") + "\n"
       + "后台每 " + Math.round((st.paused.every_sec || 300) / 60)
@@ -851,18 +930,14 @@ function renderSwitch(st){
     b.title = rd.ready
       ? "当前：关。点一下开启自动同步（后台每隔几秒自动拉取并同步一轮，列表自动刷新）"
       : ("还开不了，先解决：" + rd.blockers.join("；"));
-  } else if (busy) {
-    b.textContent = "中止本轮";
-    b.disabled = false;
-    b.classList.add("primary");
-    b.title = ("正在同步中 —— 点一下中止当前这一轮（自动同步保持开着）。"
-               + "不是立即掐断：会把当前这条处理完再停，已完成的动作不回滚。"
-               + "想彻底关掉自动同步：先在这里中止，等它不忙时再点一下这个按钮。");
   } else {
     b.textContent = "自动同步：开";
     b.disabled = false;
     b.classList.add("primary");
-    b.title = "当前：开。点一下关闭自动同步";
+    // 说明"点一下就是关" —— 关掉时本轮会自然收尾，不需要额外的中止按钮。
+    b.title = ("当前：开。点一下关闭自动同步。\n"
+               + "正在跑的那一轮会在处理完当前这条后收尾（已完成的动作不回滚）；"
+               + "下次想接着跑，直接再打开即可。");
   }
 
   // 状态文字统一写进副标题行的 #autoStatus（一个元素、定宽）。
@@ -1705,33 +1780,18 @@ async function startGraphLogin(){
 // 自动同步开关按钮：点一下开、点一下关。
 // 打开后**不用刷新页面**：后台每轮都会重拉列表并更新 last_notes，
 // 前端本来就在每 5 秒轮询 /api/state + /api/notes，所以列表会自己动起来。
-// 一个按钮、两种职能（自动同步开关 + 中止），**点下去做什么由当前状态决定**：
-//   自动同步开着 + 正在跑 → 中止当前这一轮（开关保持开着）
-//   其他情况             → 开 / 关自动同步
+//
+// ★ 这个按钮**只是开/关**（用户要求：不再兼职「中止本轮」）。
+//   开着时点一下 = 关：后端收到 auto_sync=false 后，当前这一轮会在
+//   处理完正在写的那一条之后自然收尾（已完成的动作不回滚）。
+//   所以"关掉"本身就覆盖了"中止"的需求，不需要再多一个入口。
 // 状态从 lastState 取（refresh() 每次都会更新它），不要去猜按钮上的文字。
 $("btnAuto").onclick = async () => {
   const b = $("btnAuto");
   const st = lastState || {};
   const on = !!st.auto_sync;
-  const busy = !!st.busy;
   b.disabled = true;
 
-  // ---- 正在跑：这次点击是"中止本轮" ----
-  if (on && busy) {
-    let r;
-    try { r = await api("/api/sync/abort", {}); }
-    catch (e) { r = {ok: false, error: (e && e.message) || String(e)}; }
-    if (!r || r.ok === false) {
-      toast("中止失败：" + ((r && r.error) || "未知原因"), "err");
-      b.disabled = false;
-    } else {
-      toast("已请求中止 —— 当前这条处理完就停，自动同步保持开着", "ok");
-    }
-    refresh();
-    return;
-  }
-
-  // ---- 否则：开 / 关自动同步 ----
   const want = !on;
   b.textContent = want ? "正在开启…" : "正在关闭…";
   let r;
@@ -1740,8 +1800,9 @@ $("btnAuto").onclick = async () => {
   if (!r || r.ok === false) {
     alert("操作失败：\n" + ((r && r.error) || "未知原因"));
   } else {
+    // 关掉时补一句"本轮会收尾" —— 否则用户看到进度条还在动会以为没生效。
     toast(want ? "自动同步已开启 —— 后台会每隔几秒自动拉取并同步一轮"
-               : "自动同步已关闭", "ok");
+               : "自动同步已关闭 —— 正在跑的那一轮会处理完当前这条后收尾", "ok");
   }
   refresh();
 };
