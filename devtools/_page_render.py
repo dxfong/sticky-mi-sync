@@ -207,10 +207,19 @@ def load_html(rev: str | None) -> str:
     return out.stdout
 
 
-def run_scenario(browser, html: str, sc: dict, tag: str) -> None:
-    """跑一个场景：注入 → 过闸 → 断言各面板有内容 + 无 JS 异常。"""
-    page_html = html.replace(
-        "<head>", "<head>" + make_stub(sc["state"], NOTES), 1)
+def safe(s: str) -> str:
+    """把任意标签变成安全文件名 —— URL 里的 `:` `/` 在 Windows 上是非法的。"""
+    return "".join(ch if (ch.isalnum() or ch in "-_.") else "_" for ch in s)[:60]
+
+
+def run_scenario(browser, html: str, sc: dict, tag: str,
+                 url: str | None = None) -> None:
+    """跑一个场景：注入 → 过闸 → 断言各面板有内容 + 无 JS 异常。
+
+    `url` 给了就从**真实服务器**加载页面（走网络），否则用本地 HTML 字符串。
+    前者才是真正的端到端 —— 它验的是"线上那份文件"，不是工作区那份。
+    """
+    stub = make_stub(sc["state"], NOTES)
     nm = sc["name"]
     print(f"\n-- 场景：{nm} --")
 
@@ -218,8 +227,14 @@ def run_scenario(browser, html: str, sc: dict, tag: str) -> None:
     pw_errors: list[str] = []
     pg.on("pageerror", lambda e: pw_errors.append(str(e)))
 
-    pg.set_content(page_html, wait_until="load")
-    pg.wait_for_timeout(500)
+    if url:
+        # 必须在导航**之前**注入，否则页面自己的脚本先跑完了
+        pg.add_init_script(stub.replace("<script>", "").replace("</script>", ""))
+        pg.goto(url, wait_until="load")
+    else:
+        pg.set_content(html.replace("<head>", "<head>" + stub, 1),
+                       wait_until="load")
+    pg.wait_for_timeout(600)
     # boot() 会问鉴权状态；桩数据让它到此为止。这里手动过闸，
     # 走的就是用户点完登录后的那条路径（startApp → refresh → 轮询）。
     pg.evaluate("() => { if (typeof startApp === 'function') startApp(); }")
@@ -239,7 +254,8 @@ def run_scenario(browser, html: str, sc: dict, tag: str) -> None:
     first_title = pg.evaluate(
         "() => { const e = document.querySelector('#mergedList .t');"
         " return e ? e.textContent : ''; }")
-    shot = SHOTS / f"page_render_{tag}_{nm.replace(' ', '_').replace('（','_').replace('）','')}.png"
+    shot = SHOTS / (f"page_render_{safe(tag)}_"
+                    + safe(nm) + ".png")
     pg.screenshot(path=str(shot))
     pg.close()
 
@@ -264,12 +280,14 @@ def main() -> int:
     ap.add_argument("--rev", default=None,
                     help="从 git 取该版本的 web/index.html（默认用工作区文件）")
     ap.add_argument("--only", default=None, help="只跑名字里含该子串的场景")
+    ap.add_argument("--url", default=None,
+                    help="从真实服务器加载页面（端到端），如 http://192.168.31.66:8787/")
     args = ap.parse_args()
 
-    html = load_html(args.rev)
-    if "<head>" not in html:
+    html = load_html(args.rev) if not args.url else ""
+    if html and "<head>" not in html:
         sys.exit("index.html 里找不到 <head>，无法注入桩")
-    tag = args.rev or "working"
+    tag = args.url or args.rev or "working"
 
     print("=" * 72)
     print(f"页面渲染回归 —— 版本：{tag}｜场景数 "
@@ -281,7 +299,7 @@ def main() -> int:
         for sc in SCENARIOS:
             if args.only and args.only not in sc["name"]:
                 continue
-            run_scenario(b, html, sc, tag)
+            run_scenario(b, html, sc, tag, url=args.url)
         b.close()
 
     print("\n" + "=" * 72)
