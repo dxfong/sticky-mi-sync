@@ -991,7 +991,14 @@ async function renderLogs(){
     try {
       const r = await api("/api/logs?levels=warn,error&limit=500");
       logs = r.logs || [];
-      hint = `· 已留存 ${logs.length} 条问题日志（不随流水账淘汰）`;
+      const days = (r.keep && r.keep.problem_days) || 90;
+      // 说明"留多久" —— 用户明确要求按三个月保存，界面上要能看见这件事
+      const oldest = logs.length
+        ? new Date(logs[logs.length-1].ts*1000).toLocaleDateString("zh-CN")
+        : "";
+      hint = `· 问题日志保留 ${days} 天（约三个月），不会随流水账清空` +
+             `｜本条列出 ${logs.length} 条` +
+             (oldest ? `，最早 ${oldest}` : "");
     } catch (e) {
       logs = [];
       hint = "· 读取问题日志失败：" + (e.message || e);

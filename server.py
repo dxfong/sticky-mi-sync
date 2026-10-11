@@ -30,8 +30,8 @@ from notesync import mi_pwd, mi_qr
 from notesync.auth import Auth, COOKIE, SESSION_TTL, check_strength
 from notesync.engine import SyncEngine, iso_to_ms
 from notesync.graph import LocalGraph, MockGraph, NotesFabricGraph, RealGraph
-from notesync.store import (LOG_KEEP_INFO, LOG_KEEP_PROBLEM,
-                            LOG_PROBLEM_LEVELS, Store)
+from notesync.store import (LOG_KEEP_INFO, LOG_KEEP_PROBLEM_DAYS,
+                            LOG_KEEP_PROBLEM_MAX, LOG_PROBLEM_LEVELS, Store)
 from notesync.textutil import content_hash, strip_block_markers
 from notesync.xiaomi import MockXiaomi, RealXiaomi
 
@@ -896,7 +896,9 @@ class Handler(BaseHTTPRequestHandler):
                 "logs": store.recent_logs(limit, levels=levels, offset=offset),
                 "counts": store.log_counts(),
                 "levels": levels,
-                "keep": {"info": LOG_KEEP_INFO, "problem": LOG_KEEP_PROBLEM},
+                "keep": {"info": LOG_KEEP_INFO,
+                         "problem_days": LOG_KEEP_PROBLEM_DAYS,
+                         "problem_max": LOG_KEEP_PROBLEM_MAX},
                 "problem_levels": list(LOG_PROBLEM_LEVELS),
             })
 

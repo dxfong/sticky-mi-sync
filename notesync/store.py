@@ -23,11 +23,19 @@ from typing import Any
 # 用户要求（2026-10-12）原话：
 #   「把所有错误和警告信息保存下来，正常的日志可以覆盖，
 #     但不应该覆盖有问题的日志」
+#   「改成按三个月保存」
 #
-# 所以两级**各留各的**，互不挤占：
-LOG_KEEP_INFO = 500          # info 是流水账，留最近这些就够
-LOG_KEEP_PROBLEM = 5000      # warn/error **不会被 info 挤掉**
-LOG_DEDUP_SEC = 60           # 同一条消息多久之内算"重复"（只压行、不丢信息）
+# 所以两级各留各的、**判据也不同**：
+#   · info       按**条数** —— 它本来就是流水账，被日常刷屏挤掉没关系
+#   · warn/error 按**时间** —— 保留三个月，且**绝不被 info 挤掉**
+LOG_KEEP_INFO = 500            # info 只留最近这些条
+LOG_KEEP_PROBLEM_DAYS = 90     # warn/error 保留 90 天（约三个月）
+# 防爆上限：只在日志失控（比如某个 bug 死循环刷日志）时兜底。
+# 正常三个月的量远到不了这个数 —— 估算：去重后最坏约 1440 条/天，
+# 90 天 ≈ 13 万条（约 20MB），仍然安全。
+# 设它是为了别让"一个 bug"把整块数据盘写满。
+LOG_KEEP_PROBLEM_MAX = 200000
+LOG_DEDUP_SEC = 60             # 同一条消息多久之内算"重复"（只压行、不丢信息）
 LOG_PROBLEM_LEVELS = ("warn", "error")
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -300,16 +308,18 @@ class Store:
 
         二、分级留存（2026-10-12 用户要求）
             用户的诉求原话：「把所有错误和警告信息保存下来，正常的日志可以覆盖，
-            但不应该覆盖有问题的日志」。
+            但不应该覆盖有问题的日志」，随后又要求「改成按三个月保存」。
 
-            所以 info 与 warn/error **各自独立计数、各自淘汰**：
-              · info  只留最近 `LOG_KEEP_INFO` 条 —— 它本来就是流水账，
+            所以 info 与 warn/error **各留各的，判据也不同**：
+              · info  按**条数**留最近 `LOG_KEEP_INFO` 条 —— 它本来就是流水账，
                       被日常刷屏挤掉没关系
-              · warn/error 留最近 `LOG_KEEP_PROBLEM` 条 —— **绝不被 info 挤掉**
+              · warn/error 按**时间**留 `LOG_KEEP_PROBLEM_DAYS` 天（90 天 ≈ 三个月）
+                      —— **绝不被 info 挤掉**
 
             以前的写法是一条 SQL 按时间砍掉第 501 条之后的所有行，
             不分级别 —— 于是同步一进入坏网络状态，几百条 info 流水账
-            会把之前的告警全冲走，用户回头根本查不到当时报过什么。
+            会把之前的告警全冲走，用户回头根本查不到当时报过什么
+            （实测代价：排查一个真 bug 时，3 小时前的告警已经没了）。
         """
         with self._lock:
             now = int(time.time())
@@ -334,18 +344,28 @@ class Store:
                 (now, level, msg, now))
 
             # ---- 分级淘汰：只在自己这一级里砍，绝不跨级 ----
-            # `level='info'` 与 `level<>'info'` 互不干扰，
-            # 所以正常日志再多也挤不掉告警。
+            # info：按**条数**砍（`level='info'` 与 `level<>'info'` 互不干扰，
+            #       所以正常日志再多也挤不掉告警）。
             self.db.execute(
                 "DELETE FROM log WHERE level = 'info' AND rowid NOT IN ("
                 "  SELECT rowid FROM log WHERE level = 'info' "
                 "  ORDER BY rowid DESC LIMIT ?)",
                 (LOG_KEEP_INFO,))
+            # warn/error：按**时间**砍 —— 保留三个月（用户要求）。
+            # 判定用 `ts`（**首次**出现的时间），不是 `last_ts`：
+            # 一条从三个月前每 60 秒报一次的消息会把 last_ts 一直刷新，
+            # 用 last_ts 判它就永远删不掉（连续报错反倒让日志无限长）。
+            # 用 ts 判 = "这条问题最早是什么时候出现的"，超过三个月才清。
+            _cutoff = now - LOG_KEEP_PROBLEM_DAYS * 86400
+            self.db.execute(
+                "DELETE FROM log WHERE level <> 'info' AND ts < ?", (_cutoff,))
+            # 防爆兜底：正常三个月用不到（见常量处的估算），
+            # 只在日志失控时拦住"把数据盘写满"。
             self.db.execute(
                 "DELETE FROM log WHERE level <> 'info' AND rowid NOT IN ("
                 "  SELECT rowid FROM log WHERE level <> 'info' "
                 "  ORDER BY rowid DESC LIMIT ?)",
-                (LOG_KEEP_PROBLEM,))
+                (LOG_KEEP_PROBLEM_MAX,))
             self.db.commit()
 
     def recent_logs(self, limit: int = 100, levels: list[str] | None = None,

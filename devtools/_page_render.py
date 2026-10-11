@@ -123,6 +123,8 @@ LOGS_PROBLEM = {
     ],
     "counts": {"info": 480, "warn": 120, "error": 7},
     "levels": ["warn", "error"],
+    # 留存策略（界面上要能看见"按三个月保存"这件事）
+    "keep": {"info": 500, "problem_days": 90, "problem_max": 200000},
 }
 
 NOTES = {
@@ -311,6 +313,9 @@ def run_scenario(browser, html: str, sc: dict, tag: str,
        "问题日志" in prob_text, prob_text[:90] or "（空）")
     ok(pre + "去重次数显示成 (×N)（只压行、不丢信息）",
        "×137" in prob_text, prob_text[:90] or "（空）")
+    # ★ 用户明确要求"按三个月保存" —— 界面上要能看见这件事
+    ok(pre + "「只看问题」提示里写明保留 90 天（约三个月）",
+       "90 天" in prob_hint and "三个月" in prob_hint, prob_hint or "（空）")
 
 
 def main() -> int:
