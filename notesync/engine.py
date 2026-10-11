@@ -350,6 +350,11 @@ ACTION_DELETE_XIAOMI = "delete_xiaomi"
 ACTION_DELETE_GRAPH = "delete_graph"
 ACTION_LINK_NEW_MI = "link_new_mi"
 ACTION_LINK_NEW_GRAPH = "link_new_graph"
+# 对面**已经有同内容的未配对条目** → 直接关联，不再新建一份。
+# 为什么需要这个动作：没有它时会造出重复副本（2026-10-12 用户实测碰到），
+# 而重复副本一旦产生就再也不会自己消失（它的时间戳被回填成原始时间，
+# 于是又会被"配对前既有"的保护挡住）。
+ACTION_LINK_EXIST = "link_exist"
 
 LABELS = {
     ACTION_TO_XIAOMI: "便笺 -> 小米",
@@ -359,6 +364,7 @@ LABELS = {
     ACTION_DELETE_GRAPH: "删除便笺",
     ACTION_LINK_NEW_MI: "新建小米笔记",
     ACTION_LINK_NEW_GRAPH: "新建便笺",
+    ACTION_LINK_EXIST: "关联同内容条目（不新建）",
     ACTION_SKIP: "跳过",
 }
 
@@ -881,12 +887,57 @@ class SyncEngine:
             except (TypeError, ValueError):
                 pairing_since = 0
             if policy == "graph_authoritative" and not pairing_since:
-                # 没记过就现在记 —— 此刻之前存在的小米笔记视作"既有笔记"
+                # 没记过就现在记 —— 此刻**已存在**的小米笔记视作"既有笔记"
                 pairing_since = int(time.time() * 1000)
                 self.store.set_meta("pairing_since", str(pairing_since))
                 self.store.log(
-                    "首次配对起点已记录：此刻之前就存在的小米笔记保持不动"
+                    "首次配对起点已记录：此刻就存在的小米笔记保持不动"
                     "（策略 graph_authoritative）；之后新建的会正常同步")
+
+            # ★★★ 保护的真正判据：**配对起点那一刻的小米笔记 id 集合**，
+            #     而不是时间（2026-10-12 修正）。
+            #
+            # 为什么必须改成按 id —— 用户实测踩到，原话：
+            #   「这明显不是首次配对，怎么会和首次配对策略有关」
+            #
+            # `modify_date` 是**正文的修改时间**，不代表"这条笔记什么时候出现"。
+            # 更要命的是：本服务**自己新建小米笔记时会把这个时间回填成原始时间**
+            # （`honor_original_time` → 新建后立刻 `update_note(when_ms=…)`）。
+            # 于是**服务自己造出来的副本，时间看起来也是"过去的"** ——
+            # 按时间判就会被当成"配对前就存在"而**永久跳过**：
+            # 它既不参与同步，也不自己消失，只会在日志里每轮刷同一句警告。
+            #
+            # 改成 id 集合后语义是精确的："配对开始那一刻就存在的小米笔记"。
+            # 之后由用户或由服务新建的，id 都是新的，一律正常参与同步。
+            preexisting_ids: set[str] = set()
+            if policy == "graph_authoritative":
+                _raw_ids = self.store.get_meta("preexisting_mi_ids", "")
+                if _raw_ids:
+                    try:
+                        preexisting_ids = {str(x) for x in json.loads(_raw_ids)}
+                    except (ValueError, TypeError):
+                        preexisting_ids = set()
+                if not preexisting_ids:
+                    # 老库还没有这份快照 —— 用**当前**的小米列表补一次。
+                    # 保守方向：宁可少收养（保持不动），绝不多收养（可能误删）。
+                    preexisting_ids = {str(k) for k in m_notes}
+                    self.store.set_meta(
+                        "preexisting_mi_ids",
+                        json.dumps(sorted(preexisting_ids), ensure_ascii=False))
+                    self.store.log(
+                        f"已记录「配对前既有」的小米笔记快照："
+                        f"{len(preexisting_ids)} 条 —— 此后新建的不再受这个保护")
+
+            # 「重复副本」识别（**只为了让日志说人话，不自动删任何东西**）：
+            # 正文指纹 → 已经占用它的那个**已配对** mi_id。
+            paired_text_hash: dict[str, str] = {}
+            for _l in self.store.all_links():
+                _mid = str(_l.get("mi_id") or "")
+                _mn = m_notes.get(_mid) or self._prev["xiaomi"].get(_mid)
+                if _mid and _mn:
+                    paired_text_hash.setdefault(
+                        content_hash(_mn.get("text") or ""), _mid)
+
 
             # ---- 写入节流相关（防风控）----
             # 每轮开始把"本轮已写条数"归零。
@@ -930,6 +981,11 @@ class SyncEngine:
             #    用户实测反馈「日志里只说有 1 条，我根本不知道是哪一条」，
             #    只能来问。日志不带标识 = 用户无法自己处理。
             preexisting_skipped: list[tuple[str, str]] = []
+            # 与"配对前既有"分开统计的**重复副本**：
+            # 内容和某个**已配对**条目完全一样的小米笔记。
+            # 分开的原因见下面 ① 循环里的说明 —— 这两类的成因完全不同，
+            # 混在一句"配对前就存在"里会让人完全摸不着头脑。
+            duplicate_skipped: list[tuple[str, str, str]] = []
 
 
             def plan(kind: str, detail: str) -> None:
@@ -1312,6 +1368,29 @@ class SyncEngine:
             # 前一个循环刚建好关联，用旧集合会把"刚建好的"又当成未关联，
             # 于是重复创建一份。
 
+            # ---------------- 0) 「新建前查重」索引（两个方向共用）----------------
+            #
+            # 为什么必须在**新建之前**查一次重：
+            #   只要某一轮因为任何原因（link 表被清过、两侧快照一时不一致…）
+            #   把一条**内容已经存在**的笔记当成"对面没有"而新建，
+            #   就会留下一份**永远无法自愈**的重复副本 ——
+            #   它新建后时间会被回填成原始时间，于是又被"配对前既有"的保护
+            #   挡在门外，既不参与同步、也不会自己消失，只会在日志里刷警告。
+            #   用户 2026-10-12 实测碰到过（「怎么就自动多出一条」）。
+            #
+            # 判定只用**正文指纹完全相等**（content_hash），不做模糊匹配：
+            #   宁可漏判（照旧新建），也不误并（把本应分开的两条合并）。
+            _g_by_hash: dict[str, list[str]] = {}
+            for _gid0, _gn0 in g_notes.items():
+                _g_by_hash.setdefault(
+                    content_hash(_gn0.get("text") or ""), []).append(str(_gid0))
+            _m_by_hash_all: dict[str, list[str]] = {}
+            for _mid0, _mn0 in m_notes.items():
+                _m_by_hash_all.setdefault(
+                    content_hash(_mn0.get("text") or ""), []).append(str(_mid0))
+            _linked_g_now = {l.get("graph_id") for l in self.store.all_links()
+                             if l.get("graph_id")}
+
             # ---------------- ① 小米侧新增 → 便笺
             linked_m = {l.get("mi_id") for l in self.store.all_links()}
             for mi_id, m in m_notes.items():
@@ -1321,24 +1400,52 @@ class SyncEngine:
                 tick(key_m)
                 if mi_id in linked_m or mi_id in dropped["xiaomi"]:
                     continue
-                # ★ 判定必须用**时间**，不能用"是否首次配对" ——
-                #   要保护的是"配对开始之前就存在的小米笔记"；
-                #   配对之后用户新写的（比如刚在手机上记的）必须收过来。
-                #   用 first_run 判定会因为 paired 标志而漏掉这种情况：
-                #   用户清空小米后重新配对，新写的那条也被当成"既有笔记"跳过了。
+                # ★ 判据是 **id 快照**（配对起点那一刻就存在的小米笔记），
+                #   不是时间 —— 原因见上面 `preexisting_ids` 的说明。
+                #   曾经用 `modify_date < pairing_since` 判，把**服务自己
+                #   回填过原始时间的新建副本**也误判进来了。
                 if policy == "graph_authoritative":
-                    _mt = int(m.get("modify_date") or 0)
-                    if not _mt or _mt < pairing_since:
-                        plan(ACTION_SKIP,
-                             f"配对前既有的小米笔记 {mi_id[:8]} 保持不动"
-                             f"（策略 graph_authoritative）")
-                        # 标题取 subject（小米列表接口就给），没有就取正文首行。
-                        # 只给用户看，截断到 40 字避免日志被长标题撑爆。
+                    _h0 = content_hash(m.get("text") or "")
+                    _twin0 = paired_text_hash.get(_h0)
+                    # 「重复副本」优先判：内容**已经有一条配对好的条目**在用。
+                    # ★ 这一条必须**跳过而不是收养** —— 收养会在便笺侧
+                    #   再造一份同内容的重复（那就把重复从一端搬到两端了）。
+                    _is_dup = bool(_twin0) and _twin0 != str(mi_id)
+                    _is_pre = str(mi_id) in preexisting_ids
+                    if _is_dup or _is_pre:
                         _title = (m.get("subject")
                                   or first_line(m.get("text") or "")
                                   or "(无标题)").strip()
-                        preexisting_skipped.append((mi_id, _title[:40]))
+                        if _is_dup:
+                            plan(ACTION_SKIP,
+                                 f"重复副本 {mi_id[:8]} 跳过（内容与已同步的 "
+                                 f"{_twin0[:8]} 完全一致）")
+                            duplicate_skipped.append(
+                                (mi_id, _title[:40], _twin0))
+                        else:
+                            plan(ACTION_SKIP,
+                                 f"配对前既有的小米笔记 {mi_id[:8]} 保持不动"
+                                 f"（策略 graph_authoritative）")
+                            preexisting_skipped.append((mi_id, _title[:40]))
                         continue
+
+                # ★★ 新建前查重（对称于 ② 里那段）：便笺侧**已经有同内容的
+                #    未配对条目**时直接关联，不新建 —— 否则会造出重复副本。
+                _m_hash0 = content_hash(m.get("text") or "")
+                _twin_g = next(
+                    (c for c in _g_by_hash.get(_m_hash0, [])
+                     if c not in _linked_g_now and c not in dropped["graph"]),
+                    None)
+                if _twin_g:
+                    plan(ACTION_LINK_EXIST,
+                         f"小米 {str(mi_id)[:8]} 与便笺侧 {_twin_g[:8]} 内容完全一致"
+                         f" → 直接关联（不新建，避免重复副本）")
+                    if not dry:
+                        self.store.upsert_link(mi_id, _twin_g, _m_hash0,
+                                               m.get("change_key", ""))
+                        _linked_g_now.add(_twin_g)
+                    continue
+
                 plan(ACTION_LINK_NEW_GRAPH, f"新小米笔记 -> 新建便笺 {mi_id}")
                 if not dry:
                     created = self.graph.create_note(
@@ -1375,16 +1482,39 @@ class SyncEngine:
                 if len(preexisting_skipped) > len(_shown):
                     _detail += f"；等共 {len(preexisting_skipped)} 条"
                 self.store.log(
-                    f"小米侧有 {len(preexisting_skipped)} 条**配对前就存在**的笔记，"
-                    f"按 graph_authoritative 策略保持不动（这是设计行为，不是失败）"
-                    f"：{_detail}。"
-                    f"想让它们也过来，把「首次配对策略」改成 adopt_both 后重跑；"
-                    f"若确认是重复内容，直接在小米笔记里删掉这几条即可",
+                    f"小米侧有 {len(preexisting_skipped)} 条**配对开始前就存在**"
+                    f"的笔记，按 graph_authoritative 策略保持不动"
+                    f"（这是设计行为，不是失败）：{_detail}。"
+                    f"想让它们也过来，把「首次配对策略」改成 adopt_both 后重跑",
                     "warn")
+
+            if duplicate_skipped:
+                # ★ 这一类和"首次配对策略"**没有任何关系**，必须单独说清楚。
+                #   用户 2026-10-12 质问「这明显不是首次配对，怎么会和首次配对
+                #   策略有关」—— 因为上一版把它和上面那条混在一起报了。
+                #   成因：这层内容**已经有配对好的条目**，多出来的这个是副本
+                #   （最常见是历史上某一轮重复新建留下的）。
+                _shown = duplicate_skipped[:5]
+                _detail = "；".join(
+                    f"{mid}（{title}）与已同步的 {twin[:12]} 内容完全相同"
+                    for mid, title, twin in _shown)
+                if len(duplicate_skipped) > len(_shown):
+                    _detail += f"；等共 {len(duplicate_skipped)} 条"
+                self.store.log(
+                    f"小米侧有 {len(duplicate_skipped)} 条**重复副本**"
+                    f"（内容与已同步的条目完全一致，与首次配对策略无关）："
+                    f"{_detail}。服务不会动它们；"
+                    f"确认不需要，在列表里勾选后用「删除选中」清掉即可",
+                    "warn")
+
 
             # ---------------- ② 便笺 → 小米
             linked_g = {l.get("graph_id") for l in self.store.all_links()
                         if l.get("graph_id")}
+            # ★ ① 循环可能刚建过关联，映射表**重新取一次**（与上面 ① 同一理由）。
+            linked_m_now = {l.get("mi_id") for l in self.store.all_links()}
+            # 「新建前查重」索引在 0) 里已经建好（`_m_by_hash_all`），这里直接用。
+            _m_by_hash = _m_by_hash_all
 
             # ★ 写入方向：默认**从最新的一条开始**（用户要求"最新优先"）。
             #
@@ -1431,6 +1561,29 @@ class SyncEngine:
                 if not xiaomi_ok:
                     errors.append(f"便笺 {gid[:8]} 未关联，但小米写入已关闭，跳过")
                     continue
+
+                # ★★ 新建前查重：小米侧**已经有同内容的未配对条目**时，
+                #    直接把两者关联起来，而不是再建一份副本。
+                #    没有这层保护就会造重复（用户 2026-10-12 实测碰到），
+                #    而且重复副本永远不会自己消失 —— 它新建后时间会被回填成
+                #    原始时间，于是又被"配对前既有"的保护挡在门外。
+                #    判定用正文指纹（`content_hash`），只有**完全一致**才算，
+                #    不做任何模糊匹配 —— 宁可漏判，不可错并。
+                _g_hash = content_hash(g["text"])
+                _twin_m = next(
+                    (c for c in _m_by_hash.get(_g_hash, [])
+                     if c not in linked_m_now and c not in dropped["xiaomi"]),
+                    None)
+                if _twin_m:
+                    plan(ACTION_LINK_EXIST,
+                         f"便笺 {gid[:8]} 与小米侧 {_twin_m[:8]} 内容完全一致"
+                         f" → 直接关联（不新建，避免重复副本）")
+                    if not dry:
+                        self.store.upsert_link(_twin_m, gid, _g_hash,
+                                               g.get("change_key", ""))
+                        linked_m_now.add(_twin_m)
+                    continue
+
                 plan(ACTION_LINK_NEW_MI, f"新便笺 -> 新建小米笔记 {gid[:8]}")
                 if not dry:
                     created = self.xiaomi.create_note(
