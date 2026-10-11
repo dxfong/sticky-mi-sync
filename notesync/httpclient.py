@@ -82,9 +82,16 @@ class _NoCloseHTTPHandler(urllib.request.HTTPHandler):
 
 class _NoCloseHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
+        # ★ 只传 `context=`。
+        #   标准库 3.13 的 `HTTPSHandler.__init__` **只设 `self._context`**
+        #   （老版本还会设 `self._check_hostname`，3.13 起没了），
+        #   而 `http.client.HTTPSConnection.__init__` 也不接受 `check_hostname`。
+        #   曾经照抄老版本写法传了 `check_hostname=self._check_hostname`
+        #   → 部署后每次都炸 `AttributeError: '_NoCloseHTTPSHandler'
+        #     object has no attribute '_check_hostname'`（实测踩到）。
+        #   只传 `context` 在新老版本上都合法，用 getattr 兜住 `_context` 缺失。
         return self.do_open(_NoCloseHTTPSConnection, req,
-                            context=self._context,
-                            check_hostname=self._check_hostname)
+                            context=getattr(self, "_context", None))
 
 
 def build(use_proxy: bool = True) -> urllib.request.OpenerDirector:
