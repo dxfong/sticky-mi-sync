@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import http.client
 import json
 import re
 import time
@@ -89,9 +90,24 @@ except Exception:                      # pragma: no cover
 # 「重试有用」的错误类型 —— 只认**连接层**：
 #   · 连接被重置 / 中途断开（URLError 包着 SSLEOFError 等）
 #   · 超时
+#   · **响应体读到一半被掐**（IncompleteRead）—— 实测**出现频率最高**的一类
 # 刻意**排除** `urllib.error.HTTPError`：它虽然是 URLError 的子类，
 # 但那是服务端明确回了一个状态码（401/403/404…），重试同一个请求毫无意义。
-TRANSIENT_NET_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError)
+TRANSIENT_NET_ERRORS = (
+    urllib.error.URLError,          # 秒级抖动 / SSL 中断（urllib 会包一层）
+    TimeoutError,
+    ConnectionError,                # 含 ConnectionResetError / RemoteDisconnected
+    # ★★ `http.client.IncompleteRead`：下载响应体时连接被掐断。
+    #   2026-10-11 实测：某 80 分钟内 56 次非致命错误里 **44 次是它**
+    #   （`IncompleteRead(N bytes read)`），是最主要的一类。
+    #   以前它**不在这个元组里** —— 它既不是 OSError 也不是 URLError
+    #   （它继承 `http.client.HTTPException`），于是 `_is_transient_net_error`
+    #   返回 False → `_pull_list` **不重试**，直接中断整轮。
+    #   加进来之后这类抖动重试一次基本都能过。
+    http.client.IncompleteRead,
+    # 服务端回了一段不是 HTTP 的东西（截断/串线），重连通常就好了。
+    http.client.BadStatusLine,
+)
 
 # 「重试没用、必须人去处理」的关键词。
 # 为什么用关键词而不是异常类型：这些错误从各个 provider 里以
@@ -201,7 +217,10 @@ PAUSE_HINT_TITLE = "⚠️ 同步服务已暂停（需要处理）"
 #
 # 这类瞬时错误重试一次基本都能过。而且**重试仍失败也不该停同步** ——
 # 用户明确要求：「非致命错误继续重试，不要停止同步」。
-TRANSIENT_NET_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError)
+#
+# ★ 元组本身定义在上面（模块常量区），这里**不要重复定义** ——
+#   曾经这里又写了一遍 `TRANSIENT_NET_ERRORS = (...)`，把上面那份悄悄覆盖掉；
+#   两处不同步时，改一处完全不生效（"改了没反应"的经典成因）。
 PULL_RETRY_TIMES = 1          # 再试几次
 PULL_RETRY_WAIT = 2.0         # 每次之间等多久（秒）
 
@@ -903,10 +922,14 @@ class SyncEngine:
 
             # （dropped / touched 已在 try 之前声明 —— finally 里要用。）
 
-            # 本轮因"配对前既有"而跳过的小米笔记条数。
+            # 本轮因"配对前既有"而跳过的小米笔记。
             # **必须单独计数并写进日志** —— ACTION_SKIP 是不进日志的，
             # 否则用户会看到"点了同步但小米那条没动"，完全不知道为什么。
-            preexisting_skipped = 0
+            #
+            # ★★ 2026-10-11 起同时**记下 id 与标题**（不再只报条数）：
+            #    用户实测反馈「日志里只说有 1 条，我根本不知道是哪一条」，
+            #    只能来问。日志不带标识 = 用户无法自己处理。
+            preexisting_skipped: list[tuple[str, str]] = []
 
 
             def plan(kind: str, detail: str) -> None:
@@ -1309,7 +1332,12 @@ class SyncEngine:
                         plan(ACTION_SKIP,
                              f"配对前既有的小米笔记 {mi_id[:8]} 保持不动"
                              f"（策略 graph_authoritative）")
-                        preexisting_skipped += 1
+                        # 标题取 subject（小米列表接口就给），没有就取正文首行。
+                        # 只给用户看，截断到 40 字避免日志被长标题撑爆。
+                        _title = (m.get("subject")
+                                  or first_line(m.get("text") or "")
+                                  or "(无标题)").strip()
+                        preexisting_skipped.append((mi_id, _title[:40]))
                         continue
                 plan(ACTION_LINK_NEW_GRAPH, f"新小米笔记 -> 新建便笺 {mi_id}")
                 if not dry:
@@ -1336,10 +1364,22 @@ class SyncEngine:
                             ms_to_iso(m.get("modify_date"))))
 
             if preexisting_skipped:
+                # ★★ 必须**列出是哪几条**（id + 标题）。只报条数没法排查 ——
+                #    用户 2026-10-11 实测反馈："日志里只说有 1 条，
+                #    我根本不知道是哪一条，只能来问你"。
+                #    日志不带标识 = 用户无法自己处理。
+                # 最多列 5 条，多的用"等 N 条"收尾（避免长列表把日志压满）。
+                _shown = preexisting_skipped[:5]
+                _detail = "；".join(
+                    f"{mid}（{title}）" for mid, title in _shown)
+                if len(preexisting_skipped) > len(_shown):
+                    _detail += f"；等共 {len(preexisting_skipped)} 条"
                 self.store.log(
-                    f"小米侧有 {preexisting_skipped} 条**配对前就存在**的笔记，"
-                    f"按 graph_authoritative 策略保持不动（这是设计行为，不是失败）。"
-                    f"想让它们也过来，把「首次配对策略」改成 adopt_both 后重跑",
+                    f"小米侧有 {len(preexisting_skipped)} 条**配对前就存在**的笔记，"
+                    f"按 graph_authoritative 策略保持不动（这是设计行为，不是失败）"
+                    f"：{_detail}。"
+                    f"想让它们也过来，把「首次配对策略」改成 adopt_both 后重跑；"
+                    f"若确认是重复内容，直接在小米笔记里删掉这几条即可",
                     "warn")
 
             # ---------------- ② 便笺 → 小米
@@ -1550,15 +1590,13 @@ class SyncEngine:
             #
             # 为什么要降级日志级别：`URLError` 打红字会让用户以为同步坏了，
             # 而实际上它下一轮自己就好了。红字应该留给"真的需要你去处理"的事。
+            #
+            # ★★ 这里**不再自己打日志**（曾经打过，和 `_mark_fail` 里那句重复）：
+            #    同一个错误被记两条 → 500 条的日志额度白掉一半，
+            #    用户翻日志时也是同样的错误一行两遍，很难读。
+            #    记账 + 措辞统一由 `_mark_fail` 负责（致命/非致命两边都有）。
             kind = _error_kind(RuntimeError(err))
-            if kind == "fatal":
-                self.store.log(f"同步失败：{err}", "error")
-                self._mark_fail(err, fatal=True)
-            else:
-                self.store.log(
-                    f"同步失败（非致命，**不会停止自动同步**，下一轮继续重试）："
-                    f"{err}", "warn")
-                self._mark_fail(err, fatal=False)
+            self._mark_fail(err, fatal=(kind == "fatal"))
         return summary
 
     # ------------------------------------------------------------ 列表局部更新
@@ -1845,9 +1883,15 @@ class SyncEngine:
             # ★★ 非致命：**只记一笔，别的什么都不做**。
             #    不推 fail_streak、不暂停、不写提示笔记。
             #    它下一轮自己就会重试 —— 这正是用户要的"继续重试"。
+            #
+            # ★ 措辞统一成「同步失败（非致命…）」。
+            #   以前 `run_once` 这里之外还有一句自己的 `同步失败（非致命…）`，
+            #   于是**同一个错误被记两条**（实测：136 条 warn 其实只对应 ~68 次），
+            #   白白吃掉一半的日志额度（上限只有 500 条）。
+            #   现在**记录职责只在这一处**，run_once 不再自己打日志。
             self.store.log(
-                f"同步遇到非致命错误，**不会停止自动同步**，下一轮继续重试：{err}",
-                "warn")
+                f"同步失败（非致命，**不会停止自动同步**，下一轮继续重试）："
+                f"{err}", "warn")
             return
 
         # ---- 以下都是致命错误：确实是"重试也没用、要人处理"了 ----
