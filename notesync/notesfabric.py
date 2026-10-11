@@ -58,13 +58,20 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from . import httpclient
+
 BASE = "https://substrate.office.com/NotesFabric/api/v2.0/me/notes"
 TIMEOUT = 45
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0")
 
-# substrate 是境外服务，和 graph 一样需要代理时走系统代理；这里保持默认行为
-OPENER = urllib.request.build_opener()
+# substrate 是境外服务，和 graph 一样需要代理时走系统代理；这里保持默认行为。
+#
+# ★ 但**不能**用裸 `urllib.request.build_opener()`：urllib 会给每个请求硬加
+#   `Connection: close`，在带透明代理的链路上会把大响应截断。
+#   改用 httpclient.OPENER —— 保留代理行为，只摘掉那个头。
+#   （实测对照表见 notesync/httpclient.py 顶部。）
+OPENER = httpclient.OPENER
 
 
 class FabricError(RuntimeError):

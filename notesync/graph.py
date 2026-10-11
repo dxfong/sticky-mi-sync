@@ -21,6 +21,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from . import httpclient
 from .textutil import html_to_text, note_html
 
 GRAPH = "https://graph.microsoft.com/v1.0"
@@ -66,7 +67,10 @@ def _post_form(url: str, data: dict[str, str], token: str = "") -> dict[str, Any
         headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        # ★ 用 httpclient 而不是 urllib.request.urlopen ——
+        #   urllib 会硬加 `Connection: close`，在带透明代理的链路上
+        #   会导致大响应被截断（详见 notesync/httpclient.py 的实测表）。
+        with httpclient.urlopen(req, timeout=TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         # 必须把 AAD 的错误体和错误码带出来，否则只剩一句 "HTTP Error 400"，
@@ -95,7 +99,9 @@ def _request(
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        # ★ 同上：绕开 urllib 硬写的 `Connection: close`
+        #   （见 notesync/httpclient.py 顶部那张实测对照表）
+        with httpclient.urlopen(req, timeout=TIMEOUT) as resp:
             raw = resp.read().decode("utf-8", "replace")
             return resp.status, _as_json(raw)
     except urllib.error.HTTPError as e:

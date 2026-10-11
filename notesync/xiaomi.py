@@ -29,6 +29,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from . import httpclient
 from .credlife import cached_profile_life
 from .textutil import (first_line, first_nonempty_line, mi_content_to_text,
                        text_to_mi_xml)
@@ -48,7 +49,11 @@ RETRY_GRACE = 300
 # i.mi.com 是境内站点，直连比走代理稳。环境里如果设了 HTTP_PROXY，
 # urllib 默认会把请求也塞进代理，所以这里显式绕开。
 # （graph.microsoft.com 相反，需要代理时保持默认行为即可。）
-DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+#
+# ★ 另外**不能**用裸的 `build_opener`：urllib 会给每个请求硬加
+#   `Connection: close`，在带透明代理的链路上会把大响应截断。
+#   httpclient.DIRECT 同时满足"不走代理"和"不发那个头"。
+DIRECT = httpclient.DIRECT
 
 
 class QuotaExceeded(RuntimeError):
