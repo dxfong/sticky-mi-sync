@@ -30,7 +30,8 @@ from notesync import mi_pwd, mi_qr
 from notesync.auth import Auth, COOKIE, SESSION_TTL, check_strength
 from notesync.engine import SyncEngine, iso_to_ms
 from notesync.graph import LocalGraph, MockGraph, NotesFabricGraph, RealGraph
-from notesync.store import Store
+from notesync.store import (LOG_KEEP_INFO, LOG_KEEP_PROBLEM,
+                            LOG_PROBLEM_LEVELS, Store)
 from notesync.textutil import content_hash, strip_block_markers
 from notesync.xiaomi import MockXiaomi, RealXiaomi
 
@@ -859,6 +860,10 @@ class Handler(BaseHTTPRequestHandler):
             st = engine.state()
             st["config"] = store.cfg
             st["logs"] = store.recent_logs(60)
+            # ★ 各级别**各留了多少条**。界面上要能告诉用户
+            #   "问题日志另外存着 N 条" —— 否则用户会以为日志还在被覆盖。
+            #   （warn/error 与 info 分级留存，互不挤占，见 store.log）
+            st["log_counts"] = store.log_counts()
             st["next_sync_at"] = RUNTIME.get("next_sync_at", 0)
             # 界面快照是否被**本地补丁**改过（不再等于远端真实状态）。
             # 前端据此在空闲时自己补一次全量拉取 —— 因为同步开关关着时，
@@ -866,6 +871,34 @@ class Handler(BaseHTTPRequestHandler):
             st["snapshot_dirty"] = bool(getattr(engine, "snapshot_dirty", False))
             st["now"] = time.time()
             return self._json(st)
+
+        if path == "/api/logs":
+            # 取日志，可按级别过滤。
+            #
+            # 为什么单独开这个端点：`/api/state` 只给 60 条"最近的"，
+            # 而 warn/error 是**分级单独留存**的（上限 5000 条，不被 info 挤掉）。
+            # 界面上勾"只看问题"时来这里取，能看到比 60 条多得多的历史告警。
+            #
+            # 例：/api/logs?levels=warn,error&limit=500
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                limit = max(1, min(2000, int((q.get("limit") or ["200"])[0])))
+            except ValueError:
+                limit = 200
+            try:
+                offset = max(0, int((q.get("offset") or ["0"])[0]))
+            except ValueError:
+                offset = 0
+            raw_levels = (q.get("levels") or [""])[0].strip()
+            levels = [x.strip() for x in raw_levels.split(",") if x.strip()] \
+                if raw_levels else None
+            return self._json({
+                "logs": store.recent_logs(limit, levels=levels, offset=offset),
+                "counts": store.log_counts(),
+                "levels": levels,
+                "keep": {"info": LOG_KEEP_INFO, "problem": LOG_KEEP_PROBLEM},
+                "problem_levels": list(LOG_PROBLEM_LEVELS),
+            })
 
         if path == "/api/trash":
             # 回收站列表。`graph_exists` / `xiaomi_exists` 表示**删除前**那一侧

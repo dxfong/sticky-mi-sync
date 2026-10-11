@@ -450,7 +450,13 @@
   </div>
 
   <div class="card">
-    <h2>日志</h2>
+    <h2>日志
+      <label class="kv" style="font-weight:400;cursor:pointer;white-space:nowrap">
+        <input type="checkbox" id="logProblemOnly" style="vertical-align:-1px">
+        只看问题
+      </label>
+      <span class="kv" id="logHint" style="font-weight:400"></span>
+    </h2>
     <ul class="log" id="logList"></ul>
   </div>
 </div>
@@ -703,12 +709,11 @@ async function refresh(){
   //   $("mockCard").style.display = (g.mode==="mock"||x.mode==="mock") ? "block" : "none";
   $("mockCard").style.display = "none";
 
-  const logs = st.logs || [];
-  $("logList").innerHTML = logs.map(l => {
-    const t = new Date(l.ts*1000).toLocaleTimeString("zh-CN",{hour12:false});
-    const cls = l.level === "error" ? "error" : l.level === "warn" ? "warn" : "";
-    return `<li class="${cls}">${t}  ${esc(l.msg)}</li>`;
-  }).join("") || '<li>暂无日志</li>';
+  // 日志面板：默认跟着 /api/state 的"最近 60 条"；
+  // 勾了「只看问题」就去 /api/logs 取**分级单独留存**的告警。
+  // 为什么要单独取：warn/error 与 info 是**各留各的**（上限 5000 / 500），
+  // 流水账再多也挤不掉告警 —— 但 /api/state 只回 60 条，看不到那么远。
+  await renderLogs();
 
   const nt = await api("/api/notes");
   const rows = nt.rows || [];
@@ -967,6 +972,50 @@ let folderRendered = false;
 // 最近一次 /api/state 的完整结果。给"需要按当前状态决定可用性"的控件用 ——
 // 主要是「同步选中」：自动同步开着时它必须置灰（否则手动点会和后台那一轮撞车）。
 let lastState = {};
+// 日志面板是否"只看问题"。
+// 打开时走 /api/logs（分级留存的告警，最多 500 条）；
+// 关着时走 /api/state 的最近 60 条（混合）。
+let logProblemOnly = false;
+
+// 渲染日志列表。两种数据源：
+//   · 默认：/api/state 里的 st.logs（最近 60 条，含 info 流水账）
+//   · 只看问题：/api/logs?levels=warn,error —— warn/error 是**分级单独留存**的
+//     （上限 5000 条），不会被 info 挤掉，所以这里能看到久得多的历史告警。
+// `(×N)` 表示同一条消息被去重合并了 N 次 —— 去重只压行、不丢信息。
+async function renderLogs(){
+  const counts = (lastState && lastState.log_counts) || {};
+  const nProb = (counts.warn || 0) + (counts.error || 0);
+  let logs = [], hint = "";
+
+  if (logProblemOnly) {
+    try {
+      const r = await api("/api/logs?levels=warn,error&limit=500");
+      logs = r.logs || [];
+      hint = `· 已留存 ${logs.length} 条问题日志（不随流水账淘汰）`;
+    } catch (e) {
+      logs = [];
+      hint = "· 读取问题日志失败：" + (e.message || e);
+    }
+  } else {
+    logs = (lastState && lastState.logs) || [];
+    hint = nProb ? `· 另有 ${nProb} 条问题日志单独留存（勾选左侧可看）` : "";
+  }
+
+  $("logHint").textContent = hint;
+  $("logList").innerHTML = logs.map(l => {
+    const t = new Date(l.ts*1000).toLocaleTimeString("zh-CN",{hour12:false});
+    const cls = l.level === "error" ? "error" : l.level === "warn" ? "warn" : "";
+    // 最后一次出现的时间与次数：让"这条错误一直在刷"一眼可见
+    const n = l.n > 1 ? ` <b>(×${l.n})</b>` : "";
+    return `<li class="${cls}">${t}  ${esc(l.msg)}${n}</li>`;
+  }).join("") || '<li>暂无日志</li>';
+}
+
+// 勾选框一改就立刻重渲染（不等到下一次 2 秒轮询）
+$("logProblemOnly").addEventListener("change", (e) => {
+  logProblemOnly = !!e.target.checked;
+  renderLogs();
+});
 // 「界面快照需要补一次全量拉取」的去重 + 退避。
 // 为什么需要：同步开关关着时后台不会重拉列表，而"就地补丁"不等价于
 // 和远端真实状态完全一致 —— 不补的话偏差会一直显示下去（实测反馈过）。

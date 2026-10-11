@@ -18,6 +18,18 @@ import time
 from pathlib import Path
 from typing import Any
 
+# ---------------------------------------------------------------- 日志留存策略
+#
+# 用户要求（2026-10-12）原话：
+#   「把所有错误和警告信息保存下来，正常的日志可以覆盖，
+#     但不应该覆盖有问题的日志」
+#
+# 所以两级**各留各的**，互不挤占：
+LOG_KEEP_INFO = 500          # info 是流水账，留最近这些就够
+LOG_KEEP_PROBLEM = 5000      # warn/error **不会被 info 挤掉**
+LOG_DEDUP_SEC = 60           # 同一条消息多久之内算"重复"（只压行、不丢信息）
+LOG_PROBLEM_LEVELS = ("warn", "error")
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "port": 8787,
     # 自动同步默认关闭：条件不满足时不应该偷偷跑，必须由用户显式打开
@@ -114,7 +126,12 @@ CREATE TABLE IF NOT EXISTS cred (
 CREATE TABLE IF NOT EXISTS log (
     ts    INTEGER NOT NULL,
     level TEXT NOT NULL,
-    msg   TEXT NOT NULL
+    msg   TEXT NOT NULL,
+    -- 同一条消息在 60 秒内重复出现时的**重复次数**（见 log() 的去重说明）。
+    -- 有它才能做到"不丢信息"：去重只压掉重复行，次数仍然记得住。
+    n      INTEGER NOT NULL DEFAULT 1,
+    -- 最后一次重复出现的时间（去重窗口以它为准）
+    last_ts INTEGER
 );
 CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
@@ -193,11 +210,20 @@ class Store:
             # 引擎会回退到 base_hash，行为与从前一致。
             "ALTER TABLE link ADD COLUMN g_hash TEXT",
             "ALTER TABLE link ADD COLUMN m_hash TEXT",
+            # 日志的"重复次数"与"最后出现时间"（见 log()）
+            "ALTER TABLE log ADD COLUMN n INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE log ADD COLUMN last_ts INTEGER",
         ):
             try:
                 self.db.execute(stmt)
             except sqlite3.OperationalError:
                 pass          # 列已存在
+        # 分级留存要按 level 过滤，加个索引（老库补建，幂等）
+        try:
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_log_level_rowid ON log(level, rowid)")
+        except sqlite3.OperationalError:
+            pass
 
     def _load_config(self) -> dict[str, Any]:
         cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # 深拷贝默认值
@@ -260,33 +286,100 @@ class Store:
 
     # ---------------------------------------------------------------- 日志
     def log(self, msg: str, level: str = "info") -> None:
-        """写日志。**自动去重**：同样的内容在 60 秒内只写一条。
+        """写日志。**去重 + 分级留存**。
 
-        守卫意义：凭据过期时同步循环会每几秒失败一次，如果不去重，
-        日志会被同一条错误刷屏，用户真正需要看的信息全被埋掉（这个现象出现过）。
+        两件事都是用户明确要求过的，各说清楚：
+
+        一、去重（同 level+msg 在 60 秒内只记一条）
+            凭据过期时同步循环几秒就失败一次，不去重日志会被同一条错误刷屏，
+            用户真正需要看的信息全被埋掉（这个现象出现过）。
+
+            ★ 但**去重不等于丢弃**：重复出现次数记在 `n` 里、最后出现时间记在
+              `last_ts` 里。所以"这条错误发生过 137 次、从 15:52 刷到 18:06"
+              这种信息是**留得住的**，只是不占 137 行。
+
+        二、分级留存（2026-10-12 用户要求）
+            用户的诉求原话：「把所有错误和警告信息保存下来，正常的日志可以覆盖，
+            但不应该覆盖有问题的日志」。
+
+            所以 info 与 warn/error **各自独立计数、各自淘汰**：
+              · info  只留最近 `LOG_KEEP_INFO` 条 —— 它本来就是流水账，
+                      被日常刷屏挤掉没关系
+              · warn/error 留最近 `LOG_KEEP_PROBLEM` 条 —— **绝不被 info 挤掉**
+
+            以前的写法是一条 SQL 按时间砍掉第 501 条之后的所有行，
+            不分级别 —— 于是同步一进入坏网络状态，几百条 info 流水账
+            会把之前的告警全冲走，用户回头根本查不到当时报过什么。
         """
         with self._lock:
             now = int(time.time())
             row = self.db.execute(
-                "SELECT ts FROM log WHERE level=? AND msg=? ORDER BY ts DESC LIMIT 1",
+                "SELECT rowid, ts, last_ts FROM log WHERE level=? AND msg=? "
+                "ORDER BY rowid DESC LIMIT 1",
                 (level, msg),
             ).fetchone()
-            if row and now - int(row["ts"]) < 60:
-                return
+            # 用 last_ts（最后一次出现）而不是 ts（第一次出现）算窗口 ——
+            # 否则一条持续报错的消息过了 60 秒就会被再记一行，
+            # 反而变成"每 60 秒一行"的新刷屏。
+            if row is not None:
+                _last = int(row["last_ts"] or row["ts"] or 0)
+                if now - _last < LOG_DEDUP_SEC:
+                    self.db.execute(
+                        "UPDATE log SET n = n + 1, last_ts = ? WHERE rowid = ?",
+                        (now, row["rowid"]))
+                    self.db.commit()
+                    return
             self.db.execute(
-                "INSERT INTO log(ts, level, msg) VALUES(?,?,?)", (now, level, msg)
-            )
-            # 只留最近 500 条，别让日志把库撑大
+                "INSERT INTO log(ts, level, msg, n, last_ts) VALUES(?,?,?,1,?)",
+                (now, level, msg, now))
+
+            # ---- 分级淘汰：只在自己这一级里砍，绝不跨级 ----
+            # `level='info'` 与 `level<>'info'` 互不干扰，
+            # 所以正常日志再多也挤不掉告警。
             self.db.execute(
-                "DELETE FROM log WHERE ts < (SELECT ts FROM log ORDER BY ts DESC LIMIT 1 OFFSET 500)"
-            )
+                "DELETE FROM log WHERE level = 'info' AND rowid NOT IN ("
+                "  SELECT rowid FROM log WHERE level = 'info' "
+                "  ORDER BY rowid DESC LIMIT ?)",
+                (LOG_KEEP_INFO,))
+            self.db.execute(
+                "DELETE FROM log WHERE level <> 'info' AND rowid NOT IN ("
+                "  SELECT rowid FROM log WHERE level <> 'info' "
+                "  ORDER BY rowid DESC LIMIT ?)",
+                (LOG_KEEP_PROBLEM,))
             self.db.commit()
 
-    def recent_logs(self, limit: int = 100) -> list[dict[str, Any]]:
-        rows = self.db.execute(
-            "SELECT ts, level, msg FROM log ORDER BY ts DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [{"ts": r["ts"], "level": r["level"], "msg": r["msg"]} for r in rows]
+    def recent_logs(self, limit: int = 100, levels: list[str] | None = None,
+                    offset: int = 0) -> list[dict[str, Any]]:
+        """读回日志，可按级别过滤。
+
+        `levels` 传了就只返回这些级别（例如 `["warn","error"]` 看问题），
+        此时**不受 info 的淘汰影响** —— 告警是单独留存的。
+        """
+        cols = "ts, level, msg, n, last_ts"
+        if levels:
+            ph = ",".join("?" * len(levels))
+            rows = self.db.execute(
+                f"SELECT {cols} FROM log WHERE level IN ({ph}) "
+                f"ORDER BY rowid DESC LIMIT ? OFFSET ?",
+                (*levels, limit, offset)).fetchall()
+        else:
+            rows = self.db.execute(
+                f"SELECT {cols} FROM log ORDER BY rowid DESC LIMIT ? OFFSET ?",
+                (limit, offset)).fetchall()
+        out = []
+        for r in rows:
+            out.append({"ts": r["ts"], "level": r["level"], "msg": r["msg"],
+                        "n": int(r["n"] or 1),
+                        "last_ts": r["last_ts"] or r["ts"]})
+        return out
+
+    def log_counts(self) -> dict[str, int]:
+        """各级别各留了多少条 —— 给界面显示"还有多少条问题日志没看到"。"""
+        out: dict[str, int] = {}
+        for r in self.db.execute(
+                "SELECT level, count(*) c FROM log GROUP BY level"):
+            out[str(r["level"])] = int(r["c"])
+        return out
 
     # ---------------------------------------------------------------- 映射表
     def all_links(self) -> list[dict[str, Any]]:

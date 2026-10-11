@@ -98,13 +98,31 @@ BASE_STATE = {
         "auto_sync": False,
     },
     "logs": [
-        {"ts": NOW - 30, "level": "info", "msg": "同步完成：0 个动作"},
+        {"ts": NOW - 30, "level": "info", "msg": "同步完成：0 个动作",
+         "n": 1, "last_ts": NOW - 30},
         {"ts": NOW - 60, "level": "warn",
-         "msg": "拉取微软便笺列表遇到网络抖动，2 秒后重试…"},
+         "msg": "拉取微软便笺列表遇到网络抖动，2 秒后重试…",
+         "n": 3, "last_ts": NOW - 20},
         {"ts": NOW - 90, "level": "info",
-         "msg": "自动拉取列表：便笺 164 条 / 小米 164 条"},
+         "msg": "自动拉取列表：便笺 164 条 / 小米 164 条",
+         "n": 1, "last_ts": NOW - 90},
     ],
+    # warn/error 是**分级单独留存**的（上限 5000，不被 info 挤掉），
+    # 界面据此提示"另有 N 条问题日志"。见 store.log / _test_logs.py。
+    "log_counts": {"info": 480, "warn": 120, "error": 7},
     "snapshot_dirty": False,
+}
+
+# 「只看问题」勾上后走 /api/logs（分级留存的告警，比 /api/state 的 60 条远得多）
+LOGS_PROBLEM = {
+    "logs": [
+        {"ts": NOW - 100, "level": "warn", "msg": "问题日志：网络抖动",
+         "n": 137, "last_ts": NOW - 5},
+        {"ts": NOW - 200, "level": "error", "msg": "问题日志：写入失败",
+         "n": 1, "last_ts": NOW - 200},
+    ],
+    "counts": {"info": 480, "warn": 120, "error": 7},
+    "levels": ["warn", "error"],
 }
 
 NOTES = {
@@ -192,7 +210,8 @@ window.fetch = function (url, opt) {
   }));
 };
 </script>
-""" % json.dumps({"/api/state": state, "/api/notes": notes},
+""" % json.dumps({"/api/state": state, "/api/notes": notes,
+                 "/api/logs": LOGS_PROBLEM},
                  ensure_ascii=False)
 
 
@@ -254,6 +273,18 @@ def run_scenario(browser, html: str, sc: dict, tag: str,
     first_title = pg.evaluate(
         "() => { const e = document.querySelector('#mergedList .t');"
         " return e ? e.textContent : ''; }")
+
+    # ★ 日志留存（2026-10-12 新增）
+    #   ① 默认视图的提示里要说清"另有 N 条问题日志单独留存"
+    #   ② 勾上「只看问题」→ 改走 /api/logs，拿到分级留存的告警
+    #   ③ 去重合并的次数要显示成 (×N) —— 只压行、不丢信息
+    # 这几步必须在 pg.close() 之前跑。
+    log_hint_default = txt("#logHint")
+    pg.check("#logProblemOnly")
+    pg.wait_for_timeout(700)
+    prob_text, prob_hint = txt("#logList"), txt("#logHint")
+    log_hint_final = log_hint_default
+
     shot = SHOTS / (f"page_render_{safe(tag)}_"
                     + safe(nm) + ".png")
     pg.screenshot(path=str(shot))
@@ -273,6 +304,13 @@ def run_scenario(browser, html: str, sc: dict, tag: str,
     ok(pre + "记录计数非空", row_count.startswith("("), row_count)
     ok(pre + "按钮文案正确", sc["expect_btn"] in btn_auto,
        f"期望含「{sc['expect_btn']}」，实际「{btn_auto}」")
+    # ---- 日志留存（2026-10-12）----
+    ok(pre + "日志区提示说明「问题日志单独留存」",
+       "留存" in log_hint_final, log_hint_final or "（空）")
+    ok(pre + "「只看问题」能取到分级留存的告警（走 /api/logs）",
+       "问题日志" in prob_text, prob_text[:90] or "（空）")
+    ok(pre + "去重次数显示成 (×N)（只压行、不丢信息）",
+       "×137" in prob_text, prob_text[:90] or "（空）")
 
 
 def main() -> int:
