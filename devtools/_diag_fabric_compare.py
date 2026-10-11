@@ -68,7 +68,25 @@ def main() -> int:
             print("  ✖ fabric 还没登录（cred 表里没有 fabric_auth）。")
             print("    → 先在界面「账号与登录」里把 MSAuth1.0 usertoken 粘进来，再跑本脚本。")
             return 2
-        notes = fg.list_notes()
+        # ★ 自带重试：容器 → substrate 这条链路实测抖动剧烈
+        #   （IncompleteRead(15878/109000)、TimeoutError 反复出现）。
+        #   引擎的 `_pull_list` 有重试，但我这里直接调 provider 就没有 ——
+        #   所以本脚本自己重试，否则一次抖动就白跑。
+        notes = None
+        last = None
+        for attempt in range(1, 6):
+            try:
+                notes = fg.list_notes()
+                break
+            except Exception as e:
+                last = e
+                print(f"  第 {attempt} 次失败：{type(e).__name__}: {str(e)[:120]}")
+                if attempt < 5:
+                    import time as _t
+                    _t.sleep(3)
+        if notes is None:
+            print(f"  ✖ 重试 5 次仍失败：{type(last).__name__}: {str(last)[:200]}")
+            return 3
     except Exception as e:
         print(f"  ✖ 拉取失败：{type(e).__name__}: {str(e)[:300]}")
         return 3
