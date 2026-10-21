@@ -110,6 +110,9 @@ BASE_STATE = {
     # warn/error 是**分级单独留存**的（上限 5000，不被 info 挤掉），
     # 界面据此提示"另有 N 条问题日志"。见 store.log / _test_logs.py。
     "log_counts": {"info": 480, "warn": 120, "error": 7},
+    # 后台循环心跳（2026-10-21 新增）：界面据此判断"同步线程还活着吗"。
+    # 5 秒前刚跳过 = 健康，不该出现任何告警。
+    "loop_beat_at": NOW - 5,
     "snapshot_dirty": False,
 }
 
@@ -185,6 +188,11 @@ SCENARIOS = [
     scenario("小米未登录", expect_btn="自动同步：关",
              readiness={"ready": False, "blockers": ["小米笔记：未登录"]},
              xiaomi={"logged_in": False, "folder": "", "folder_id": ""}),
+    # ★ 后台循环停摆（2026-10-13~21 那次事故的形态）：
+    #   容器 healthy、页面正常、按钮显示"开"，但心跳已经 10 分钟没更新。
+    #   副标题必须明说，否则用户根本发现不了"8 天没同步"。
+    scenario("循环已停（心跳过期）", expect_btn="自动同步：开",
+             auto_sync=True, loop_beat_at=NOW - 600),
 ]
 
 
@@ -316,6 +324,20 @@ def run_scenario(browser, html: str, sc: dict, tag: str,
     # ★ 用户明确要求"按三个月保存" —— 界面上要能看见这件事
     ok(pre + "「只看问题」提示里写明保留 90 天（约三个月）",
        "90 天" in prob_hint and "三个月" in prob_hint, prob_hint or "（空）")
+
+    # ---- 后台循环心跳（2026-10-21）----
+    # 停摆时必须报警；健康时**绝不能误报**（否则用户会习惯性忽略这行字）。
+    _stt = sc.get("state") or {}
+    _beat = int(_stt.get("loop_beat_at") or 0)
+    _stale = bool(_stt.get("auto_sync")) and (
+        (not _beat) or (time.time() - _beat) > 180)
+    if _stale:
+        ok(pre + "★ 后台循环停摆时，副标题明确告警",
+           ("后台同步循环已停" in subline) or ("后台同步循环未启动" in subline),
+           subline)
+    else:
+        ok(pre + "心跳正常时不误报停摆",
+           "后台同步循环" not in subline, subline)
 
 
 def main() -> int:
