@@ -632,6 +632,19 @@ async function refresh(){
     `已建立映射 ${st.counts.links} 条` +
     (st.counts.conflicts ? ` · 冲突 ${st.counts.conflicts}` : "");
 
+  // ★ 后台循环心跳：**线程死了必须看得见**。
+  //   2026-10-13 出过：一个未捕获异常把同步线程打死，
+  //   容器还是 healthy、页面照样能打开、按钮也显示"开"，但 8 天一条都没同步，
+  //   用户完全无从发现。现在用 loop_beat_at 判断，超过 3 分钟就在副标题上明说。
+  //   阈值取 180 秒：正常一轮约 25 秒，启动后第一跳也可能要几十秒。
+  const _beat = Number(st.loop_beat_at || 0);
+  const _beatAge = _beat ? Math.floor(Date.now()/1000 - _beat) : -1;
+  if (st.auto_sync && (_beatAge < 0 || _beatAge > 180)) {
+    $("subline").textContent += _beatAge < 0
+      ? " · ⚠ 后台同步循环未启动"
+      : ` · ⚠ 后台同步循环已停 ${Math.floor(_beatAge/60)} 分钟`;
+  }
+
   // 同步状态（同步中… / 有断点待续 / 运行中 · 下次同步 Ns）统一在
   // renderSwitch() 里写进副标题行的 #autoStatus —— 不再散落在多个元素上。
   // 「中止本轮」按钮已删除（用户要求）：自动同步按钮只是一个开关，

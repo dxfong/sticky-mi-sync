@@ -588,75 +588,117 @@ def pair_selected(store, engine, keys: list[str]) -> dict[str, Any]:
             "message": "已配对。两侧内容有差异时会用指示灯标出，不会被自动改写。"}
 
 
+def _sync_loop_step(store, engine) -> float:
+    """跑一轮"该干什么"的判定，返回**下一次该等多少秒**。
+
+    三种状态：
+      1. 开关开着        → 跑一轮完整同步，等 interval
+      2. 被自动暂停      → 每 PROBE_INTERVAL_SEC 做一次只读探测；通了立刻返回 1
+      3. 用户自己关着    → 什么都不做，等 interval
+
+    这个函数**允许抛异常** —— 兜底和心跳在 `_sync_loop_safe_step` 里。
+    """
+    cfg = store.cfg
+    on = bool(cfg.get("auto_sync"))
+    interval = max(1, int(cfg.get("sync_interval_sec") or 5))
+
+    # 被自动暂停了吗？判据是 meta 里的 `paused_at`（不是"auto_sync 为假"）
+    paused_at = 0
+    try:
+        paused_at = int(store.get_meta("paused_at", "0") or 0)
+    except (TypeError, ValueError):
+        paused_at = 0
+
+    if on:
+        RUNTIME["next_sync_at"] = time.time() + interval
+        RUNTIME["next_probe_at"] = 0
+        try:
+            engine.run_once(source="auto")
+        except Exception as e:  # 单轮失败不影响循环
+            store.log(f"同步本轮失败：{type(e).__name__}: {e}", "error")
+        return interval
+
+    if paused_at:
+        probe_interval = max(60, int(getattr(engine, "PROBE_INTERVAL_SEC", 300)))
+        RUNTIME["next_sync_at"] = 0
+        RUNTIME["next_probe_at"] = paused_at + probe_interval
+        if engine._pause_probe_due():
+            try:
+                res = engine.fetch_only(source="probe")
+                if res.get("ok"):
+                    # 通了 —— `fetch_only` 内部已经 `_mark_ok` 把开关打开并删掉提示笔记。
+                    # 立刻返回 1 秒，接着跑正式同步。
+                    return 1
+                engine.note_pause_probe_failed(
+                    "；".join(res.get("errors") or [])[:200])
+                store.log("暂停中探测：链路仍不通，稍后再试", "info")
+            except Exception as e:
+                engine.note_pause_probe_failed(f"{type(e).__name__}: {e}")
+                store.log(f"暂停中探测异常：{type(e).__name__}: {e}", "warn")
+        # 等到该探测的时刻；用 min 免得改配置后要等满一次旧间隔
+        return max(1, min(probe_interval,
+                          int(RUNTIME["next_probe_at"] - time.time()) or 1))
+
+    # ③ 用户自己关着 —— 真正安静
+    RUNTIME["next_sync_at"] = 0
+    RUNTIME["next_probe_at"] = 0
+    return interval
+
+
+def _sync_loop_safe_step(store, engine) -> float:
+    """把 `_sync_loop_step` 包起来：**任何异常都不许穿出去**，并打心跳。
+
+    ★★ 这个包装是"线程静默死亡"的根治（2026-10-21 追查发现）。
+
+    原来的写法只把 `engine.run_once()` 包在 try 里，而循环体前半段还有
+    `store.get_meta("paused_at")`，它只捕获 `TypeError/ValueError`。
+    2026-10-13 就是在这里死的：
+        并发访问 SQLite 抛 `InterfaceError: bad parameter or other API misuse`
+        → 不是 TypeError/ValueError → 冲出 while → **线程结束，一行日志都没有**
+        → 容器 healthy、页面能打开，但**8 天一条都没同步**，没人发现。
+    （并发的原因：读 meta / 读日志没加锁，和写日志撞在同一个 sqlite 连接上；
+      已在 `store.py` 里给所有读写都补上 `self._lock`。）
+
+    教训：**兜底要兜住整个循环体**，不能只兜"看起来危险的那一句"。
+    """
+    wait = 5.0
+    try:
+        wait = _sync_loop_step(store, engine)
+    except (SystemExit, KeyboardInterrupt):
+        raise                       # 关机信号要能正常传出去
+    except BaseException as e:      # noqa: BLE001 — 含 MemoryError 之类
+        try:
+            store.log(
+                f"同步循环异常（已捕获，循环继续，不会停摆）："
+                f"{type(e).__name__}: {e}", "error")
+        except Exception:
+            pass
+        try:
+            wait = max(1, int(store.cfg.get("sync_interval_sec") or 5))
+        except Exception:
+            wait = 5
+    finally:
+        # 心跳：**任何一条退出路径都要打点**。
+        # 界面据此判断"后台循环还活着吗" —— 没有这个数字，
+        # 线程死了 8 天用户也看不出来（这次就是这样）。
+        try:
+            store.set_meta("loop_beat_at", str(int(time.time())))
+        except Exception:
+            pass
+    return wait
+
+
 def sync_loop():
-    """后台同步循环。
+    """后台同步循环。三种状态见 `_sync_loop_step` 的说明。
 
-    三种状态，各自该干什么说清楚：
-
-      1. **开关开着**（正常）—— 每 `sync_interval_sec` 秒跑一轮完整同步。
-      2. **被自动暂停**（连续失败 3 轮）—— **不是完全不动**。
-         原来这里是彻底静默的，于是链路自己好了也没人知道，
-         用户得自己发现"今天一整天没同步"再去点开关（实测被这么反馈过）。
-         现在每 `PROBE_INTERVAL_SEC`（5 分钟）做一次**只读探测**：
-         通了就自动把开关打开、把提示笔记删掉；没通就把下次探测时间往后推。
-      3. **开关关着**（用户自己关的，或还没登录）—— 真正什么都不做。
-         不登录、不读接口、不写任何东西，这就是"没打开同步"该有的安静状态。
-         注意 ② 和 ③ 的区别：② 是**服务自己停的**，要自己爬回来；
-         ③ 是**用户主动关的**，绝不能去动它（见 `_resume_auto_sync`）。
+    这里只做两件事：调一次安全步骤、按它给的秒数等待。
+    所有业务判断和兜底都在被调函数里 —— 这样循环本身**没有机会**死。
     """
     store: Store = RUNTIME["store"]
     engine = RUNTIME["engine"]
     while not RUNTIME["stop"].is_set():
-        cfg = store.cfg
-        on = bool(cfg.get("auto_sync"))
-        interval = max(1, int(cfg.get("sync_interval_sec") or 5))
-
-        # 被自动暂停了吗？判据是 meta 里的 `paused_at`（不是"auto_sync 为假"）
-        paused_at = 0
-        try:
-            paused_at = int(store.get_meta("paused_at", "0") or 0)
-        except (TypeError, ValueError):
-            paused_at = 0
-
-        if on:
-            RUNTIME["next_sync_at"] = time.time() + interval
-            RUNTIME["next_probe_at"] = 0
-            try:
-                engine.run_once(source="auto")
-            except Exception as e:  # 兜底：循环绝不能死
-                store.log(f"同步循环异常：{type(e).__name__}: {e}", "error")
-            RUNTIME["stop"].wait(interval)
-            continue
-
-        if paused_at:
-            # ② 自动暂停中 —— 长间隔只读探测
-            probe_interval = max(60, int(getattr(engine, "PROBE_INTERVAL_SEC", 300)))
-            RUNTIME["next_sync_at"] = 0
-            RUNTIME["next_probe_at"] = paused_at + probe_interval
-            if engine._pause_probe_due():
-                try:
-                    res = engine.fetch_only(source="probe")
-                    if res.get("ok"):
-                        # 通了 —— `fetch_only` 内部已经调过 `_mark_ok`，
-                        # 那里负责把 auto_sync 打开并删掉提示笔记。
-                        # 这一轮就不要再等 5 分钟了，立刻接着跑正式同步。
-                        continue
-                    engine.note_pause_probe_failed(
-                        "；".join(res.get("errors") or [])[:200])
-                    store.log("暂停中探测：链路仍不通，稍后再试", "info")
-                except Exception as e:
-                    engine.note_pause_probe_failed(f"{type(e).__name__}: {e}")
-                    store.log(f"暂停中探测异常：{type(e).__name__}: {e}", "warn")
-            # 等到该探测的时刻；用 min 免得改配置后要等满一次旧间隔
-            wait = max(1, min(probe_interval,
-                              int(RUNTIME["next_probe_at"] - time.time()) or 1))
-            RUNTIME["stop"].wait(wait)
-            continue
-
-        # ③ 用户自己关着 —— 真正安静
-        RUNTIME["next_sync_at"] = 0
-        RUNTIME["next_probe_at"] = 0
-        RUNTIME["stop"].wait(interval)
+        wait = _sync_loop_safe_step(store, engine)
+        RUNTIME["stop"].wait(max(1, int(wait or 1)))
 
 
 # --------------------------------------------------------------------- HTTP
@@ -864,6 +906,12 @@ class Handler(BaseHTTPRequestHandler):
             #   "问题日志另外存着 N 条" —— 否则用户会以为日志还在被覆盖。
             #   （warn/error 与 info 分级留存，互不挤占，见 store.log）
             st["log_counts"] = store.log_counts()
+            # ★ 后台循环心跳。前端用它判断"同步线程还活着吗" ——
+            #   2026-10-13 那 8 天就是线程死了但界面一切正常，没人发现。
+            try:
+                st["loop_beat_at"] = int(store.get_meta("loop_beat_at", "0") or 0)
+            except (TypeError, ValueError):
+                st["loop_beat_at"] = 0
             st["next_sync_at"] = RUNTIME.get("next_sync_at", 0)
             # 界面快照是否被**本地补丁**改过（不再等于远端真实状态）。
             # 前端据此在空闲时自己补一次全量拉取 —— 因为同步开关关着时，

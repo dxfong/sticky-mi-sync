@@ -279,13 +279,19 @@ class Store:
             self.db.commit()
 
     def get_cred(self, key: str, default: Any = None) -> Any:
-        row = self.db.execute("SELECT v FROM cred WHERE k=?", (key,)).fetchone()
-        if not row:
-            return default
-        try:
-            return json.loads(row["v"])
-        except json.JSONDecodeError:
-            return default
+        # ★ 必须加锁：读也走同一条 sqlite 连接，而同步线程与 HTTP 线程会并发访问。
+        #   `check_same_thread=False` 只是关掉了"跨线程就报错"的检查，
+        #   **并不等于连接是线程安全的** —— 并发 execute 会踩坏内部的语句缓存，
+        #   抛 `InterfaceError: bad parameter or other API misuse`。
+        #   实测代价：2026-10-13 同步线程因此静默退出，8 天没同步（见下面 log() 的说明）。
+        with self._lock:
+            row = self.db.execute("SELECT v FROM cred WHERE k=?", (key,)).fetchone()
+            if not row:
+                return default
+            try:
+                return json.loads(row["v"])
+            except json.JSONDecodeError:
+                return default
 
     def del_cred(self, key: str) -> None:
         with self._lock:
@@ -375,45 +381,49 @@ class Store:
         `levels` 传了就只返回这些级别（例如 `["warn","error"]` 看问题），
         此时**不受 info 的淘汰影响** —— 告警是单独留存的。
         """
-        cols = "ts, level, msg, n, last_ts"
-        if levels:
-            ph = ",".join("?" * len(levels))
-            rows = self.db.execute(
-                f"SELECT {cols} FROM log WHERE level IN ({ph}) "
-                f"ORDER BY rowid DESC LIMIT ? OFFSET ?",
-                (*levels, limit, offset)).fetchall()
-        else:
-            rows = self.db.execute(
-                f"SELECT {cols} FROM log ORDER BY rowid DESC LIMIT ? OFFSET ?",
-                (limit, offset)).fetchall()
-        out = []
-        for r in rows:
-            out.append({"ts": r["ts"], "level": r["level"], "msg": r["msg"],
-                        "n": int(r["n"] or 1),
-                        "last_ts": r["last_ts"] or r["ts"]})
-        return out
+        with self._lock:      # ★ 读也要加锁，见 get_cred 处的说明
+            cols = "ts, level, msg, n, last_ts"
+            if levels:
+                ph = ",".join("?" * len(levels))
+                rows = self.db.execute(
+                    f"SELECT {cols} FROM log WHERE level IN ({ph}) "
+                    f"ORDER BY rowid DESC LIMIT ? OFFSET ?",
+                    (*levels, limit, offset)).fetchall()
+            else:
+                rows = self.db.execute(
+                    f"SELECT {cols} FROM log ORDER BY rowid DESC LIMIT ? OFFSET ?",
+                    (limit, offset)).fetchall()
+            out = []
+            for r in rows:
+                out.append({"ts": r["ts"], "level": r["level"], "msg": r["msg"],
+                            "n": int(r["n"] or 1),
+                            "last_ts": r["last_ts"] or r["ts"]})
+            return out
 
     def log_counts(self) -> dict[str, int]:
         """各级别各留了多少条 —— 给界面显示"还有多少条问题日志没看到"。"""
-        out: dict[str, int] = {}
-        for r in self.db.execute(
-                "SELECT level, count(*) c FROM log GROUP BY level"):
-            out[str(r["level"])] = int(r["c"])
-        return out
+        with self._lock:      # ★ 读也要加锁
+            out: dict[str, int] = {}
+            for r in self.db.execute(
+                    "SELECT level, count(*) c FROM log GROUP BY level"):
+                out[str(r["level"])] = int(r["c"])
+            return out
 
     # ---------------------------------------------------------------- 映射表
     def all_links(self) -> list[dict[str, Any]]:
-        rows = self.db.execute("SELECT * FROM link").fetchall()
-        return [dict(r) for r in rows]
+        with self._lock:      # ★ 读也要加锁，见 get_cred 处的说明
+            rows = self.db.execute("SELECT * FROM link").fetchall()
+            return [dict(r) for r in rows]
 
     def link_by_side(self, mi_id: str = "", graph_id: str = "") -> dict[str, Any] | None:
-        if mi_id:
-            row = self.db.execute("SELECT * FROM link WHERE mi_id=?", (mi_id,)).fetchone()
-        else:
-            row = self.db.execute(
-                "SELECT * FROM link WHERE graph_id=?", (graph_id,)
-            ).fetchone()
-        return dict(row) if row else None
+        with self._lock:
+            if mi_id:
+                row = self.db.execute("SELECT * FROM link WHERE mi_id=?", (mi_id,)).fetchone()
+            else:
+                row = self.db.execute(
+                    "SELECT * FROM link WHERE graph_id=?", (graph_id,)
+                ).fetchone()
+            return dict(row) if row else None
 
     def upsert_link(
         self,
@@ -493,15 +503,16 @@ class Store:
 
     def cache_load(self) -> dict[str, list[dict[str, Any]]]:
         """读回缓存的列表（按写入时的顺序没法保证，所以靠 modified_iso 排序）。"""
-        out: dict[str, list[dict[str, Any]]] = {"graph": [], "xiaomi": []}
-        rows = self.db.execute(
-            "SELECT side, payload FROM notes_cache").fetchall()
-        for r in rows:
-            try:
-                n = json.loads(r["payload"])
-            except json.JSONDecodeError:
-                continue
-            out.setdefault(r["side"], []).append(n)
+        with self._lock:      # ★ 读也要加锁，见 get_cred 处的说明
+            out: dict[str, list[dict[str, Any]]] = {"graph": [], "xiaomi": []}
+            rows = self.db.execute(
+                "SELECT side, payload FROM notes_cache").fetchall()
+            for r in rows:
+                try:
+                    n = json.loads(r["payload"])
+                except json.JSONDecodeError:
+                    continue
+                out.setdefault(r["side"], []).append(n)
         for side in out:
             # 两侧都是"越新越前"。缓存写的是原始顺序，这里重新排一次保险。
             out[side].sort(key=lambda n: (n.get("modified_iso") or ""),
@@ -555,14 +566,16 @@ class Store:
             return int(cur.lastrowid or 0)
 
     def trash_list(self, limit: int = 200) -> list[dict[str, Any]]:
-        rows = self.db.execute(
-            "SELECT * FROM trash ORDER BY deleted_at DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        with self._lock:      # ★ 读也要加锁，见 get_cred 处的说明
+            rows = self.db.execute(
+                "SELECT * FROM trash ORDER BY deleted_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def trash_get(self, tid: int) -> dict[str, Any] | None:
-        r = self.db.execute("SELECT * FROM trash WHERE tid=?", (tid,)).fetchone()
-        return dict(r) if r else None
+        with self._lock:      # ★ 读也要加锁
+            r = self.db.execute("SELECT * FROM trash WHERE tid=?", (tid,)).fetchone()
+            return dict(r) if r else None
 
     def trash_mark_restored(self, tid: int, new_tid: int = -1) -> None:
         """标记为已恢复。`new_tid` 存恢复后新建的便笺 id 的哈希不现实，
@@ -588,8 +601,9 @@ class Store:
             self.db.commit()
 
     def get_meta(self, key: str, default: str = "") -> str:
-        row = self.db.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
-        return row["v"] if row and row["v"] is not None else default
+        with self._lock:      # ★ 读也要加锁，见 get_cred 处的说明
+            row = self.db.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+            return row["v"] if row and row["v"] is not None else default
 
 
 def masked(cfg: dict[str, Any]) -> dict[str, Any]:
