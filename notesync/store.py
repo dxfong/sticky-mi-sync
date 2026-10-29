@@ -383,15 +383,24 @@ class Store:
         """
         with self._lock:      # ★ 读也要加锁，见 get_cred 处的说明
             cols = "ts, level, msg, n, last_ts"
+            # ★ 排序用 `last_ts`（最后一次出现），不是 `ts`（首次出现）。
+            #   为什么：去重会把"每 25 秒一条、内容相同"的日志压成一行，
+            #   而 `ts` 永远停在首次那一刻 → 界面看着像**日志冻住了**。
+            #   实测：2026-10-30 用户问"是不是半小时没输出了"，
+            #   其实那 45 分钟里 `同步完成` 跑了 174 次（n=174），
+            #   只是这一行的 ts 一直显示 23:49。
+            #   按 last_ts 排 + 前端显示 last_ts，日志会正常往上走。
+            #   `COALESCE` 兜住老库（补列后 last_ts 可能是 NULL）。
+            order = "ORDER BY COALESCE(last_ts, ts) DESC, rowid DESC"
             if levels:
                 ph = ",".join("?" * len(levels))
                 rows = self.db.execute(
                     f"SELECT {cols} FROM log WHERE level IN ({ph}) "
-                    f"ORDER BY rowid DESC LIMIT ? OFFSET ?",
+                    f"{order} LIMIT ? OFFSET ?",
                     (*levels, limit, offset)).fetchall()
             else:
                 rows = self.db.execute(
-                    f"SELECT {cols} FROM log ORDER BY rowid DESC LIMIT ? OFFSET ?",
+                    f"SELECT {cols} FROM log {order} LIMIT ? OFFSET ?",
                     (limit, offset)).fetchall()
             out = []
             for r in rows:

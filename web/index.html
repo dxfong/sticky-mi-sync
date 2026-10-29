@@ -1018,15 +1018,40 @@ async function renderLogs(){
     }
   } else {
     logs = (lastState && lastState.logs) || [];
-    hint = nProb ? `· 另有 ${nProb} 条问题日志单独留存（勾选左侧可看）` : "";
+    // ★ 这里直接回答"服务还活着吗"。
+    //   用户 2026-10-30 就是靠"日志列表有没有动"来判断的，而**去重会让列表看着不动**
+    //   （同一件事每 25 秒重复一次，被压成一行）。所以额外给一个明确的
+    //   "最近一次成功同步是几秒前" —— 它每轮都在变，是最直观的活体信号。
+    const parts = [];
+    const okAt = Number((lastState && lastState.last_ok_at) || 0);
+    // 被服务自己暂停时不能写"运行中"（那是假话）。用 paused.at 判断 ——
+    // ⚠ 不能只看 `paused` 是否为真：默认状态里它是 `{}`，空对象也是真值。
+    const isPaused = !!(lastState && lastState.paused && lastState.paused.at);
+    if (okAt) {
+      const age = Math.max(0, Math.floor(Date.now()/1000 - okAt));
+      const ago = age < 90 ? `${age} 秒前` : `${Math.floor(age/60)} 分钟前`;
+      parts.push(isPaused ? `已暂停，最近一次成功同步 ${ago}`
+                          : `运行中，最近一次同步 ${ago}`);
+    }
+    if (nProb) parts.push(`另有 ${nProb} 条问题日志单独留存（勾选左侧可看）`);
+    hint = parts.length ? "· " + parts.join("　· ") : "";
   }
 
   $("logHint").textContent = hint;
   $("logList").innerHTML = logs.map(l => {
-    const t = new Date(l.ts*1000).toLocaleTimeString("zh-CN",{hour12:false});
+    // ★ 显示**最后一次出现**的时间（last_ts），不是首次（ts）。
+    //   去重会把"每 25 秒一条、内容相同"的日志压成一行，`ts` 永远停在首次那一刻
+    //   → 界面看着像日志冻住了。2026-10-30 用户就问过「是不是半小时没输出」，
+    //   而实际那 45 分钟里同一件事发生了 174 次（n=174）。
+    const tShow = l.last_ts || l.ts;
+    const t = new Date(tShow*1000).toLocaleTimeString("zh-CN",{hour12:false});
     const cls = l.level === "error" ? "error" : l.level === "warn" ? "warn" : "";
-    // 最后一次出现的时间与次数：让"这条错误一直在刷"一眼可见
-    const n = l.n > 1 ? ` <b>(×${l.n})</b>` : "";
+    // 重复次数 + 首次出现时间：既看得出"还在跑"，也知道这条是从什么时候开始的
+    let n = "";
+    if (l.n > 1) {
+      const first = new Date(l.ts*1000).toLocaleTimeString("zh-CN",{hour12:false}).slice(0,5);
+      n = ` <b>(×${l.n} · 自 ${first})</b>`;
+    }
     return `<li class="${cls}">${t}  ${esc(l.msg)}${n}</li>`;
   }).join("") || '<li>暂无日志</li>';
 }

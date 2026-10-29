@@ -113,6 +113,10 @@ BASE_STATE = {
     # 后台循环心跳（2026-10-21 新增）：界面据此判断"同步线程还活着吗"。
     # 5 秒前刚跳过 = 健康，不该出现任何告警。
     "loop_beat_at": NOW - 5,
+    # 最近一次成功同步（日志区据此显示"运行中，最近一次同步 N 秒前"）——
+    # 用户 2026-10-30 就是靠"日志列表有没有动"判断服务死活的，
+    # 而去重会让列表看着不动，所以必须给一个每轮都在变的数字。
+    "last_ok_at": NOW - 8,
     "snapshot_dirty": False,
 }
 
@@ -317,6 +321,11 @@ def run_scenario(browser, html: str, sc: dict, tag: str,
     # ---- 日志留存（2026-10-12）----
     ok(pre + "日志区提示说明「问题日志单独留存」",
        "留存" in log_hint_final, log_hint_final or "（空）")
+    # ★ 用户 2026-10-30 的困惑：去重让日志列表看着不动 → 以为服务停了。
+    #   这里必须有一个**每轮都在变**的活体信号。
+    ok(pre + "日志区给出「最近一次同步 N 秒前」（活体信号）",
+       "最近一次" in log_hint_final and "前" in log_hint_final,
+       log_hint_final or "（空）")
     ok(pre + "「只看问题」能取到分级留存的告警（走 /api/logs）",
        "问题日志" in prob_text, prob_text[:90] or "（空）")
     ok(pre + "去重次数显示成 (×N)（只压行、不丢信息）",
