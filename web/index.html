@@ -482,13 +482,37 @@ const DEFAULT_BACKEND = "http://127.0.0.1:8787";
 let API_BASE = "";
 let lastErr = "";
 
-async function rawApi(path, body, base) {
+async function rawApi(path, body, base, timeoutMs) {
   const opt = body !== undefined
     ? {method: "POST", headers: {"Content-Type": "application/json"},
        body: JSON.stringify(body)}
     : {};
-  const r = await fetch(base + path, opt);
+
+  // ★ 超时是必须的：`fetch` 默认**永不超时**。
+  //   请求一旦卡在半开连接上（或响应在回来的路上丢了），
+  //   `await` 就永远不返回 —— 调用方的按钮会一直停在「正在关闭…」。
+  //   2026-11-04 实测踩到：后端其实早就保存好了（日志有「设置已保存」），
+  //   只是响应没回到浏览器，按钮就一直转。
+  let timer = null;
+  if (timeoutMs) {
+    const ctl = new AbortController();
+    opt.signal = ctl.signal;
+    timer = setTimeout(() => ctl.abort(), timeoutMs);
+  }
+
+  let r;
+  try {
+    r = await fetch(base + path, opt);
+  } catch (e) {
+    clearTimeout(timer);
+    if (e && e.name === "AbortError") {
+      throw new Error(`请求超时（${Math.round((timeoutMs || 0) / 1000)} 秒无响应）`);
+    }
+    throw e;
+  }
+
   const txt = await r.text();
+  clearTimeout(timer);
   try {
     const j = JSON.parse(txt);
     // 把 HTTP 状态带出去：调用方要能区分"业务失败"和"没登录"（401）。
@@ -501,7 +525,7 @@ async function rawApi(path, body, base) {
   }
 }
 
-async function api(path, body) {
+async function api(path, body, timeoutMs) {
   // ★ 只用**同源**，不再回退到 DEFAULT_BACKEND。
   //
   // 那个回退曾用来兜"页面被当成静态文件直接打开"的情况，但它有个副作用：
@@ -518,7 +542,7 @@ async function api(path, body) {
   let err = null;
   for (const b of bases) {
     try {
-      const out = await rawApi(path, body, b);
+      const out = await rawApi(path, body, b, timeoutMs);
       API_BASE = b;
       lastErr = "";
       // 401 = 没登录 / 会话失效 → 立刻弹登录页。
@@ -614,7 +638,7 @@ async function refresh(){
   if (!appStarted) return;   // 还没过登录闸门 —— 一次请求都不发
   const seq = ++refreshSeq;
   let st;
-  try { st = await api("/api/state"); }
+  try { st = await api("/api/state", undefined, 10000); }
   catch(e){ if (seq === refreshSeq) showBackendError(e); return; }
   if (seq !== refreshSeq) return;          // 已经有更新的刷新在跑了，丢弃这次
   $("errBanner").style.display = "none";
@@ -728,7 +752,7 @@ async function refresh(){
   // 流水账再多也挤不掉告警 —— 但 /api/state 只回 60 条，看不到那么远。
   await renderLogs();
 
-  const nt = await api("/api/notes");
+  const nt = await api("/api/notes", undefined, 20000);
   const rows = nt.rows || [];
   const c = nt.counts || {};
   $("rowCount").textContent =
@@ -1895,8 +1919,24 @@ $("btnAuto").onclick = async () => {
   const want = !on;
   b.textContent = want ? "正在开启…" : "正在关闭…";
   let r;
-  try { r = await api("/api/config", {patch: {auto_sync: want}}); }
-  catch (e) { r = {ok: false, error: (e && e.message) || String(e)}; }
+  // 以"实际生效的状态"为准：成功就是 want，失败就是原状态。
+  // 这样即使响应丢了/超时了，按钮文案也不会骗人。
+  let applied = on;
+  try {
+    // ★ 15 秒超时：`fetch` 默认永不超时，卡住就会永远停在"正在关闭…"
+    //   （2026-11-04 实测：后端已保存成功，但响应没回来，按钮一直转）。
+    r = await api("/api/config", {patch: {auto_sync: want}}, 15000);
+    if (r && r.ok !== false) applied = want;
+  } catch (e) {
+    r = {ok: false, error: (e && e.message) || String(e)};
+  } finally {
+    // ★ 无论如何都要把按钮恢复 —— 不能把"恢复"这件事全押在 refresh() 上，
+    //   因为 refresh() 自己也可能失败（比如 /api/state 也卡住/报错）。
+    //   这一层是最后一道保险：按钮永远不会停在「正在…」。
+    b.disabled = false;
+    b.textContent = applied ? "自动同步：开" : "自动同步：关";
+    b.classList.toggle("primary", applied);
+  }
   if (!r || r.ok === false) {
     alert("操作失败：\n" + ((r && r.error) || "未知原因"));
   } else {

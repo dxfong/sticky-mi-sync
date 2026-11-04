@@ -259,6 +259,8 @@ def run_scenario(browser, html: str, sc: dict, tag: str,
     pg = browser.new_page(viewport={"width": 1280, "height": 900})
     pw_errors: list[str] = []
     pg.on("pageerror", lambda e: pw_errors.append(str(e)))
+    # 失败路径会 alert()，不自动关掉会把后面的步骤卡死
+    pg.on("dialog", lambda d: d.dismiss())
 
     if url:
         # 必须在导航**之前**注入，否则页面自己的脚本先跑完了
@@ -299,6 +301,38 @@ def run_scenario(browser, html: str, sc: dict, tag: str,
     prob_text, prob_hint = txt("#logList"), txt("#logHint")
     log_hint_final = log_hint_default
 
+    # ★ 自动同步按钮：点完不许停在「正在…」（2026-11-04 用户实测卡住）。
+    #   用户截图：点了自动同步后按钮一直显示「正在关闭…」，
+    #   而后端**其实已经保存成功**（日志有「设置已保存：auto_sync=False」）——
+    #   只是 `fetch` 没有超时，响应丢了就永远 await 不返回 → 按钮永不恢复。
+    #   现在给了 15 秒超时 + `finally` 兜底恢复，成功/失败两条路径都要验。
+    btn_before = txt("#btnAuto")
+    btn_ok = btn_before
+    # 有些场景（如"未就绪/缺文件夹"）按钮本来就是禁用的 —— 不能硬点，
+    # 否则 Playwright 会一直 retrying 直到超时。
+    btn_enabled = pg.evaluate(
+        "() => { const b=document.querySelector('#btnAuto');"
+        " return !!(b && !b.disabled); }")
+    if btn_enabled:
+        pg.click("#btnAuto")
+        pg.wait_for_timeout(900)
+        btn_ok = txt("#btnAuto")
+
+    # 失败路径：让 /api/config 直接报网络错误 —— 按钮同样必须恢复。
+    # （失败会 alert()，run_scenario 里已挂 dialog 自动 dismiss）
+    pg.evaluate("""() => {
+      const orig = window.fetch;
+      window.fetch = (u, o) => String(u).includes('/api/config')
+        ? Promise.reject(new TypeError('Failed to fetch'))
+        : orig(u, o);
+    }""")
+    pg.evaluate("""() => {
+      const b = document.querySelector('#btnAuto');
+      if (b) { b.disabled = false; b.click(); }
+    }""")
+    pg.wait_for_timeout(900)
+    btn_fail = txt("#btnAuto")
+
     shot = SHOTS / (f"page_render_{safe(tag)}_"
                     + safe(nm) + ".png")
     pg.screenshot(path=str(shot))
@@ -333,6 +367,15 @@ def run_scenario(browser, html: str, sc: dict, tag: str,
     # ★ 用户明确要求"按三个月保存" —— 界面上要能看见这件事
     ok(pre + "「只看问题」提示里写明保留 90 天（约三个月）",
        "90 天" in prob_hint and "三个月" in prob_hint, prob_hint or "（空）")
+
+    # ---- 自动同步按钮：点完不许停在「正在…」----
+    # 用户截图：点了自动同步后按钮一直显示「正在关闭…」，而后端**已经保存成功**
+    # （日志里「设置已保存：auto_sync=False」），只是 fetch 没超时、响应丢了。
+    ok(pre + "点自动同步后按钮不会停在「正在…」",
+       (not btn_enabled) or ("正在" not in btn_ok),
+       f"可点={btn_enabled}｜点前「{btn_before}」→ 点后「{btn_ok}」")
+    ok(pre + "★ 请求失败时按钮也要恢复（不许卡在「正在…」）",
+       "正在" not in btn_fail, f"「{btn_fail}」")
 
     # ---- 后台循环心跳（2026-10-21）----
     # 停摆时必须报警；健康时**绝不能误报**（否则用户会习惯性忽略这行字）。
