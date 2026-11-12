@@ -1647,7 +1647,9 @@ class SyncEngine:
                 #   不整体重建的话，升级后的第一轮会把 110 条派生的 Subject
                 #   当成"用户在便笺改了标题" → 反过来把小米的标题清空。
                 #   所以：第一次跑只重建基线、一个字都不写。
-                _tv2 = self.store.get_meta("title_base_v", "") == "2"
+                # 版本号用 "3"：判据比 "2" 更严（Subject 是正文前缀也算派生），
+                # 所以线上那 4 条被误判成标题的，需要再重建一次基线。
+                _tv2 = self.store.get_meta("title_base_v", "") == "3"
                 for _lk in self.store.all_links():
                     _mi = str(_lk.get("mi_id") or "")
                     _gid = str(_lk.get("graph_id") or "")
@@ -1660,10 +1662,21 @@ class SyncEngine:
 
                     # 小米：extraInfo.title（显式；空 = 没设标题）
                     _m_x = (_m.get("title") or "").strip()
-                    # 便笺：Subject；若正好等于正文首行 → 派生值，当作"没设标题"
+                    # 便笺：Subject；下面三种情况都当"**没有**标题"（派生值）：
+                    #   ① 为空
+                    #   ② 正好等于正文首行
+                    #   ③ **正文以它开头** —— Outlook 会把正文前段截断塞进 Subject，
+                    #      实测有 4 条的 Subject 就是正文前 100~255 字，
+                    #      当"用户标题"会把它推去小米当标题（那就毁了）。
+                    #   ④ 过长（>120 字）—— 标题不会这么长，按派生处理，保守优先。
                     _g_sub = (_g.get("title") or "").strip()
+                    _g_body = (_g.get("text") or "").strip()
                     _g_fl = first_line(_g.get("text") or "").strip()
-                    _g_x = "" if (not _g_sub or _g_sub == _g_fl) else _g_sub
+                    if (not _g_sub or _g_sub == _g_fl
+                            or _g_body.startswith(_g_sub) or len(_g_sub) > 120):
+                        _g_x = ""
+                    else:
+                        _g_x = _g_sub
 
                     if (not _tv2) or (_lk.get("m_title") is None
                                       and _lk.get("g_title") is None):
@@ -1728,7 +1741,7 @@ class SyncEngine:
 
                 if not _tv2 and not dry:
                     # 基线整体重建完成 → 打上语义版本，之后才开始真正比对
-                    self.store.set_meta("title_base_v", "2")
+                    self.store.set_meta("title_base_v", "3")
 
             if not dry:
                 self.store.set_meta("paired", "1")
