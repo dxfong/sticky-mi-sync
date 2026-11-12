@@ -1649,7 +1649,7 @@ class SyncEngine:
                 #   所以：第一次跑只重建基线、一个字都不写。
                 # 版本号用 "3"：判据比 "2" 更严（Subject 是正文前缀也算派生），
                 # 所以线上那 4 条被误判成标题的，需要再重建一次基线。
-                _tv2 = self.store.get_meta("title_base_v", "") == "3"
+                _tv2 = self.store.get_meta("title_base_v", "") == "4"
                 for _lk in self.store.all_links():
                     _mi = str(_lk.get("mi_id") or "")
                     _gid = str(_lk.get("graph_id") or "")
@@ -1662,26 +1662,75 @@ class SyncEngine:
 
                     # 小米：extraInfo.title（显式；空 = 没设标题）
                     _m_x = (_m.get("title") or "").strip()
-                    # 便笺：Subject；下面三种情况都当"**没有**标题"（派生值）：
+                    # 便笺：Subject；下面几种情况都当"**没有**标题"（派生值）：
                     #   ① 为空
                     #   ② 正好等于正文首行
-                    #   ③ **正文以它开头** —— Outlook 会把正文前段截断塞进 Subject，
-                    #      实测有 4 条的 Subject 就是正文前 100~255 字，
-                    #      当"用户标题"会把它推去小米当标题（那就毁了）。
-                    #   ④ 过长（>120 字）—— 标题不会这么长，按派生处理，保守优先。
+                    #   ③ **正文以它开头** —— Outlook 会把正文前段截断塞进 Subject。
+                    #      ★ 必须先做**空白归一化**再比：Subject 保留 `\n` / `\xa0`，
+                    #        而我们的 `text` 走 html_to_text 后换行变成了空格，
+                    #        直接 startswith 会漏判（实测漏了 2 条）。
+                    #   ④ 过长（>120 字）—— 标题不会这么长，保守按派生处理。
                     _g_sub = (_g.get("title") or "").strip()
-                    _g_body = (_g.get("text") or "").strip()
-                    _g_fl = first_line(_g.get("text") or "").strip()
-                    if (not _g_sub or _g_sub == _g_fl
-                            or _g_body.startswith(_g_sub) or len(_g_sub) > 120):
+                    _g_body_raw = _g.get("text") or ""
+                    _norm = lambda s: re.sub(r"\s+", " ", s or "").strip()  # noqa: E731
+                    _g_body_n = _norm(_g_body_raw)
+                    _g_fl = _norm(first_line(_g_body_raw))
+                    if (not _g_sub or _norm(_g_sub) == _g_fl
+                            or _g_body_n.startswith(_norm(_g_sub))
+                            or len(_g_sub) > 120):
                         _g_x = ""
                     else:
                         _g_x = _g_sub
 
                     if (not _tv2) or (_lk.get("m_title") is None
                                       and _lk.get("g_title") is None):
-                        # 还没建基线 / 语义升级：只记，不写
-                        if not dry:
+                        # 还没建基线 / 语义升级：先重建基线。
+                        # ★ 升级时顺便**对齐已有差异**：实测 10 条便笺有真标题
+                        #   （'下单' / '培训计划' / '致辞' / 'logo'…），小米侧没有。
+                        #   既然要求两侧完全一致，这里按"便笺为权威"补到小米
+                        #   （只改 extraInfo.title，10 条 ≈ 10 秒）。
+                        if dry:
+                            continue
+                        # 只**补**不删：迁移阶段绝不因为"某一侧没有"就把另一侧清空。
+                        # 实测 10 条便笺有标题（'下单'/'培训计划'/'致辞'/'logo'…）
+                        # 小米没有 → 补到小米；反向同理补到便笩。
+                        if _g_x and not _m_x:
+                            plan(ACTION_TITLE_TO_XIAOMI,
+                                 f"对齐标题 -> 小米 {_mi[:8]}：{_g_x[:24]}")
+                            try:
+                                self.xiaomi.update_title(_mi, _g_x)
+                                self.store.set_link_titles(_mi, _g_x, _g_x)
+                            except Exception as _e:
+                                errors.append(
+                                    f"对齐标题到小米失败（{_mi[:8]}）："
+                                    f"{type(_e).__name__}: {_e}")
+                        elif _m_x and not _g_x:
+                            plan(ACTION_TITLE_TO_GRAPH,
+                                 f"对齐标题 -> 便笺 {_gid[:8]}：{_m_x[:24]}")
+                            try:
+                                _res = self.graph.update_subject(
+                                    _gid, _m_x, _lk.get("graph_changekey") or "")
+                                self.store.set_link_titles(_mi, _m_x, _m_x)
+                                if _res.get("change_key"):
+                                    self.store.set_link_graph_changekey(
+                                        _mi, _res["change_key"])
+                            except Exception as _e:
+                                errors.append(
+                                    f"对齐标题到便笺失败（{_mi[:8]}）："
+                                    f"{type(_e).__name__}: {_e}")
+                        elif _g_x != _m_x:
+                            # 两侧都有且不同 → 便笺为权威
+                            plan(ACTION_TITLE_TO_XIAOMI,
+                                 f"对齐标题（便笺为准）-> 小米 {_mi[:8]}："
+                                 f"{_g_x[:24]}")
+                            try:
+                                self.xiaomi.update_title(_mi, _g_x)
+                                self.store.set_link_titles(_mi, _g_x, _g_x)
+                            except Exception as _e:
+                                errors.append(
+                                    f"对齐标题到小米失败（{_mi[:8]}）："
+                                    f"{type(_e).__name__}: {_e}")
+                        else:
                             self.store.set_link_titles(_mi, _g_x, _m_x)
                         continue
 
@@ -1741,7 +1790,7 @@ class SyncEngine:
 
                 if not _tv2 and not dry:
                     # 基线整体重建完成 → 打上语义版本，之后才开始真正比对
-                    self.store.set_meta("title_base_v", "3")
+                    self.store.set_meta("title_base_v", "4")
 
             if not dry:
                 self.store.set_meta("paired", "1")
