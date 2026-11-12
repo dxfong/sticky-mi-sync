@@ -978,7 +978,12 @@ class Handler(BaseHTTPRequestHandler):
             def full_g(n):
                 if not n:
                     return None
-                return {"id": n["id"], "title": first_line(n.get("text")),
+                return {"id": n["id"],
+                        # ★ 优先用**显式标题**（便笺的 Subject）。没有才回落到正文首行。
+                        #   2026-11-13 之前这里直接取首行，于是小米设的标题
+                        #   在详情里永远看不见。
+                        "title": (n.get("title") or "").strip()
+                                 or first_line(n.get("text")),
                         "text": n.get("text") or "",
                         "chars": len(n.get("text") or ""),
                         "time": n.get("modified_iso") or ""}
@@ -987,7 +992,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not n:
                     return None
                 return {"id": n["id"],
-                        "title": first_line(n.get("subject") or n.get("text")),
+                        # ★ 小米的**自定义标题**在 `title`（来自 extraInfo.title）。
+                        #   `subject` 只是"没标题时用正文首行"的派生值，
+                        #   所以顺序必须是 title → subject → 正文首行。
+                        "title": (n.get("title") or "").strip()
+                                 or first_line(n.get("subject") or n.get("text")),
                         "text": n.get("text") or "",
                         "chars": len(n.get("text") or ""),
                         "time": ms_to_iso(n.get("modify_date"))}

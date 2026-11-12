@@ -70,6 +70,31 @@ class QuotaExceeded(RuntimeError):
         self.body = body
 
 
+def _mi_title(entry: dict) -> str:
+    """从列表条目的 `extraInfo` 里取**用户设的自定义标题**。
+
+    小米笔记把标题存成 `extraInfo = '{"title":"…"}'`（一个 JSON 字符串），
+    而顶层 `subject` 只是"**没有**标题时用正文首行"的派生显示值。
+
+    2026-11-13 实测（这条把判断纠正过来）：
+        某条笔记 标题 = f8727aaeb2bbaff2
+        subject   = ''                      ← 空的！只看它就把标题丢了
+        extraInfo = '{"title":"f8727aaeb2bbaff2"}'
+        content   = '+0800 2026-11-12 21:00:26 ERROR …'（19296 字，正文里没有标题）
+    以前只读 `subject`，所以「只改标题」永远不会被检测到，也不会同步出去。
+    """
+    ei = entry.get("extraInfo") or ""
+    if not ei:
+        return ""
+    try:
+        d = json.loads(ei)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(d, dict):
+        return ""
+    return str(d.get("title") or "").strip()
+
+
 def _ms_to_iso(ms) -> str:
     """小米的毫秒时间戳 → 和便笺侧同形状的 ISO 字符串（`...Z`）。
 
@@ -974,6 +999,9 @@ class RealXiaomi:
             out.append({
                 "id": nid,
                 "text": text,
+                # ★ 用户设的**自定义标题**（小米笔记的独立字段，不在正文里）。
+                #   没设时为空 —— 这种时候界面用它自己算的首行当标题。
+                "title": _mi_title(e),
                 "subject": e.get("subject") or "",
                 "folder_id": folder_id,
                 "modify_date": mtime,

@@ -355,6 +355,8 @@ ACTION_LINK_NEW_GRAPH = "link_new_graph"
 # 而重复副本一旦产生就再也不会自己消失（它的时间戳被回填成原始时间，
 # 于是又会被"配对前既有"的保护挡住）。
 ACTION_LINK_EXIST = "link_exist"
+# 小米的自定义标题 → 便笺 Subject（**只改标题、不动正文**）
+ACTION_TITLE_TO_GRAPH = "title_to_graph"
 
 LABELS = {
     ACTION_TO_XIAOMI: "便笺 -> 小米",
@@ -365,6 +367,7 @@ LABELS = {
     ACTION_LINK_NEW_MI: "新建小米笔记",
     ACTION_LINK_NEW_GRAPH: "新建便笺",
     ACTION_LINK_EXIST: "关联同内容条目（不新建）",
+    ACTION_TITLE_TO_GRAPH: "同步标题到便笺",
     ACTION_SKIP: "跳过",
 }
 
@@ -1610,6 +1613,60 @@ class SyncEngine:
                             self._mi_patch_time(
                                 iso_to_ms(g.get("modified_iso")))))
 
+            # ---------------- ③ 标题同步（小米自定义标题 → 便笺 Subject）
+            #
+            # 为什么必须是**单独一段**、不并进正文判据：
+            #   · 标题是独立字段：小米在 `extraInfo.title`，便笺在 `Subject`。
+            #     （2026-11-13 实测纠正：`subject` 只是"没有标题时用正文首行"的
+            #      派生显示值 —— 一条标题为 f872… 的笔记 `subject` 是空的。）
+            #   · 若把标题混进 `content_hash`，现有 165 条映射的 base_hash
+            #     会**全部失效** → 触发一轮全量互相覆盖，改动量和风险都太大。
+            #   · 所以标题单独记基线（link.g_title / link.m_title），
+            #     只在"标题真的变了"时才写一个 PATCH，正文一个字都不动。
+            #
+            # 方向只做 **小米 → 便笺**：
+            #   便笺的 Subject 默认由正文首行派生，用户改它本质就是改正文首行，
+            #   已经由正文同步覆盖；而小米的自定义标题在正文里根本不存在，
+            #   不推过去就永远丢失。
+            #
+            # 首次（两侧基线都是 NULL）**只记不写** —— 否则升级瞬间会把现有
+            # 110 条"派生的"便笺 Subject 全部改掉，那是灾难。
+            if g_notes and m_notes and hasattr(self.graph, "update_subject"):
+                for _lk in self.store.all_links():
+                    _mi = str(_lk.get("mi_id") or "")
+                    _gid = str(_lk.get("graph_id") or "")
+                    if not _mi or not _gid:
+                        continue
+                    _m = m_notes.get(_mi)
+                    _g = g_notes.get(_gid)
+                    if not _m or not _g:
+                        continue
+                    _m_t = (_m.get("title") or "").strip()
+                    _g_t = (_g.get("title") or "").strip()
+                    if _lk.get("m_title") is None and _lk.get("g_title") is None:
+                        # 首次建立基线：只记，不写
+                        if not dry:
+                            self.store.set_link_titles(_mi, _g_t, _m_t)
+                        continue
+                    _prev_m = (_lk.get("m_title") or "").strip()
+                    if not _m_t or _m_t == _prev_m or _g_t == _m_t:
+                        continue
+                    plan(ACTION_TITLE_TO_GRAPH,
+                         f"小米标题 -> 便笺 {_gid[:8]}：{_m_t[:24]}")
+                    if dry:
+                        continue
+                    try:
+                        _res = self.graph.update_subject(
+                            _gid, _m_t, _lk.get("graph_changekey") or "")
+                        self.store.set_link_titles(_mi, _m_t, _m_t)
+                        publish("graph", self._g_item(
+                            _gid, _g.get("text") or "",
+                            _res.get("change_key", ""),
+                            _g.get("modified_iso") or "", title=_m_t))
+                    except Exception as _e:
+                        errors.append(
+                            f"同步标题失败（{_mi[:8]}）：{type(_e).__name__}: {_e}")
+
             if not dry:
                 self.store.set_meta("paired", "1")
 
@@ -1827,13 +1884,13 @@ class SyncEngine:
         return when_ms if honor else None
 
     def _g_item(self, gid: str, text: str, change_key: str = "",
-                when_iso: str = "") -> dict[str, Any]:
+                when_iso: str = "", title: str | None = None) -> dict[str, Any]:
         """构造一条"便笺列表项"，形状与 graph.list_notes() 的返回**保持一致**。
 
         形状不一致会让 cache_add 的排序和字段读取出问题：
         例如原来 list_notes 不返回 modified_iso，cache_add 按它排序时就全是空值。
         """
-        return {
+        it = {
             "id": str(gid or ""),
             "text": text or "",
             "change_key": change_key or "",
@@ -1841,9 +1898,13 @@ class SyncEngine:
             "modified_iso": when_iso or _now_iso(),
             "deleted": False,
         }
+        if title is not None:
+            it["title"] = title or ""
+        return it
 
     def _m_item(self, mid: str, text: str,
-                when_ms: int | None = None) -> dict[str, Any]:
+                when_ms: int | None = None,
+                title: str | None = None) -> dict[str, Any]:
         """构造一条"小米笔记列表项"，形状与 xiaomi.list_notes() 保持一致。"""
         try:
             ms = int(when_ms or time.time() * 1000)
@@ -1853,7 +1914,7 @@ class SyncEngine:
             folder = self._folder_id()
         except Exception:
             folder = ""
-        return {
+        it = {
             "id": str(mid or ""),
             "text": text or "",
             "subject": first_line(text or "") or "",
@@ -1862,6 +1923,9 @@ class SyncEngine:
             "modified_iso": ms_to_iso(ms),
             "deleted": False,
         }
+        if title is not None:
+            it["title"] = title or ""
+        return it
 
     def cache_drop(self, side: str, note_id: str) -> None:
         """从列表里移除一条（它已经被删掉了）。

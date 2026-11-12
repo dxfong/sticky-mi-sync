@@ -125,7 +125,15 @@ CREATE TABLE IF NOT EXISTS link (
     -- 记两个基线之后：配对时把两侧**当前内容**分别记下来，就都算"没改"，
     --   不动任何一侧；之后哪一侧真被编辑了，对应那一侧的 hash 才会不匹配。
     g_hash          TEXT,
-    m_hash          TEXT
+    m_hash          TEXT,
+    -- ★ 标题的基线（2026-11-13）。
+    --
+    -- 小米笔记的**自定义标题**存在 `extraInfo.title` 里（独立字段，不在正文里）；
+    -- 便笺侧的 `Subject` 可以被显式设置（测过：PATCH 后读回仍是新值，正文不动）。
+    -- 所以标题单独走一条同步通道，不混进正文哈希 ——
+    -- 否则现有 165 条映射的 base_hash 全部失效，会触发一轮全量互相覆盖。
+    g_title         TEXT,
+    m_title         TEXT
 );
 CREATE TABLE IF NOT EXISTS cred (
     k TEXT PRIMARY KEY,
@@ -221,6 +229,10 @@ class Store:
             # 日志的"重复次数"与"最后出现时间"（见 log()）
             "ALTER TABLE log ADD COLUMN n INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE log ADD COLUMN last_ts INTEGER",
+            # 标题基线（见建表处的说明）。老库补齐后是 NULL = "还没建基线"，
+            # 引擎据此**只记不写**，避免升级瞬间批量改标题。
+            "ALTER TABLE link ADD COLUMN g_title TEXT",
+            "ALTER TABLE link ADD COLUMN m_title TEXT",
         ):
             try:
                 self.db.execute(stmt)
@@ -419,6 +431,18 @@ class Store:
             return out
 
     # ---------------------------------------------------------------- 映射表
+    def set_link_titles(self, mi_id: str, g_title: str, m_title: str) -> None:
+        """记下一条映射的标题基线（两侧各一份）。
+
+        单独一个方法、不塞进 `upsert_link`：`upsert_link` 在 ON CONFLICT 里
+        会重写一堆列，而标题基线只在"标题真的同步过"时才该更新。
+        """
+        with self._lock:
+            self.db.execute(
+                "UPDATE link SET g_title=?, m_title=? WHERE mi_id=?",
+                (g_title or "", m_title or "", mi_id))
+            self.db.commit()
+
     def all_links(self) -> list[dict[str, Any]]:
         with self._lock:      # ★ 读也要加锁，见 get_cred 处的说明
             rows = self.db.execute("SELECT * FROM link").fetchall()

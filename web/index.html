@@ -2137,8 +2137,14 @@ async function openDetail(key){
   // 与列表里指示灯的判据**完全一致** —— 灯是双绿的就一定只画一个框。
   if (r.same === true) {
     const s = r.graph || r.xiaomi;
+    // 标题：只有当它**不等于正文首行**时才单独显示（那才是"用户设的自定义标题"）。
+    const _fl = ((s.text || "").split("\n")[0] || "").trim();
+    const _ti = (s.title || "").trim();
+    const _custom = _ti && _ti !== _fl;
     $("detailBody").innerHTML =
       `<div style="margin-bottom:18px">
+        ${_custom ? `<div class="detailMeta" style="margin-bottom:6px">
+          <h4 style="margin:0 0 2px">标题</h4>${esc(_ti)}</div>` : ""}
         <h4>内容（两侧一致）· ${s.chars} 字</h4>
         <div class="detailText">${esc(s.text) || "（空）"}</div>
         <div class="detailMeta">

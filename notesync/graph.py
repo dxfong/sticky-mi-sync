@@ -179,6 +179,15 @@ class MockGraph:
                     when_iso: str = "") -> dict[str, Any]:
         return self.update(note_id, text)
 
+    def update_subject(self, note_id: str, subject: str,
+                       change_key: str = "") -> dict[str, Any]:
+        """只改标题。Mock 侧把 title 记在条目上即可。"""
+        for n in self.notes:
+            if str(n.get("id")) == str(note_id):
+                n["title"] = subject or ""
+                return {"id": note_id, "change_key": change_key or "ck"}
+        return {"id": note_id, "change_key": change_key or "ck"}
+
     def delete_note(self, note_id: str) -> None:
         self.delete(note_id)
 
@@ -658,6 +667,11 @@ class RealGraph:
             return {
                 "id": item.get("Id", ""),
                 "text": text,
+                # ★ 便笺的标题。Outlook 笔记**有** Subject 字段：
+                #   默认由正文首行派生，但可以显式 `PATCH {"Subject": …}` 覆盖
+                #   （2026-11-13 实测：PATCH 后读回仍是新值，且正文一字未动）。
+                #   所以小米的自定义标题能落到这里，不需要动正文。
+                "title": item.get("Subject") or "",
                 "change_key": item.get("ChangeKey", ""),
                 "modified": 0,
                 "modified_iso": item.get("LastModifiedDateTime", ""),
@@ -689,6 +703,24 @@ class RealGraph:
             raise Conflict("这条便笺在别处被改过了（412），本轮放弃写入")
         if code not in (200, 201):
             raise RuntimeError(f"更新便笺失败 {code}：{_err_text(code, data)}")
+        return {"id": note_id, "change_key": data.get("ChangeKey", "")}
+
+    def update_subject(self, note_id: str, subject: str,
+                       change_key: str = "") -> dict[str, Any]:
+        """只改**标题**（Subject），不碰正文。
+
+        为什么单独一个方法：小米的自定义标题是独立字段，便笺的 Subject 也能
+        独立写（实测通过）。所以标题同步**不该走 `update_note`** ——
+        那会把正文一起写一遍，白白刷新云端修改时间、还可能触发冲突。
+        """
+        headers = {"If-Match": change_key} if change_key else None
+        code, data = _request(
+            "PATCH", f"{OUTLOOK}/me/notes/{note_id}", self.ensure_token(),
+            {"Subject": (subject or "")[:255]}, headers)
+        if code == 412:
+            raise Conflict("这条便笺在别处被改过了（412），本轮放弃写标题")
+        if code not in (200, 201):
+            raise RuntimeError(f"更新便笺标题失败 {code}：{_err_text(code, data)}")
         return {"id": note_id, "change_key": data.get("ChangeKey", "")}
 
     def _delete_via_outlook(self, note_id: str) -> None:
