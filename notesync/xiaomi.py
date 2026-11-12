@@ -1246,6 +1246,30 @@ class RealXiaomi:
         self._detail.pop(note_id, None)
         return {"id": note_id, "tag": (r.get("data") or {}).get("tag", "")}
 
+    def update_title(self, note_id: str, title: str) -> dict[str, Any]:
+        """只改**标题**（`extraInfo.title`），正文与 `modifyDate` 一个字节都不动。
+
+        实测（2026-11-13）：
+            只改 extraInfo.title → result=ok
+            读回 content 长度 19296 → 19296（没变）
+            modifyDate 1794499565598 → 1794499565598（没变）
+        所以标题可以独立写，不会把笔记在列表里的位置搅乱。
+
+        `title=""` 就是**清空标题**（用户在小米端删掉标题后的状态）。
+        """
+        cur = self._entry(note_id)
+        e = dict(cur)
+        # 只换 extraInfo 里的 title，其它字段（content/tag/setting…）原样带回去。
+        e["extraInfo"] = self._extra_info(cur, title=title or "")
+        r = self._post_form(f"/note/note/{note_id}", {
+            "entry": json.dumps(e, ensure_ascii=False),
+            "serviceToken": self._service_token(),
+        })
+        if r.get("result") != "ok":
+            raise RuntimeError(
+                f"更新小米标题失败：{r.get('description') or str(r)[:200]}")
+        return {"id": note_id, "tag": (r.get("data") or {}).get("tag", "")}
+
     def delete_note(self, note_id: str) -> None:
         """删除笔记（软删除，进回收站）。
 

@@ -357,6 +357,8 @@ ACTION_LINK_NEW_GRAPH = "link_new_graph"
 ACTION_LINK_EXIST = "link_exist"
 # 小米的自定义标题 → 便笺 Subject（**只改标题、不动正文**）
 ACTION_TITLE_TO_GRAPH = "title_to_graph"
+# 便笺的 Subject → 小米 extraInfo.title（同上，只改标题）
+ACTION_TITLE_TO_XIAOMI = "title_to_xiaomi"
 
 LABELS = {
     ACTION_TO_XIAOMI: "便笺 -> 小米",
@@ -368,6 +370,7 @@ LABELS = {
     ACTION_LINK_NEW_GRAPH: "新建便笺",
     ACTION_LINK_EXIST: "关联同内容条目（不新建）",
     ACTION_TITLE_TO_GRAPH: "同步标题到便笺",
+    ACTION_TITLE_TO_XIAOMI: "同步标题到小米",
     ACTION_SKIP: "跳过",
 }
 
@@ -1613,25 +1616,38 @@ class SyncEngine:
                             self._mi_patch_time(
                                 iso_to_ms(g.get("modified_iso")))))
 
-            # ---------------- ③ 标题同步（小米自定义标题 → 便笺 Subject）
+            # ---------------- ③ 标题同步（双向，两侧保持一致）
             #
             # 为什么必须是**单独一段**、不并进正文判据：
             #   · 标题是独立字段：小米在 `extraInfo.title`，便笺在 `Subject`。
             #     （2026-11-13 实测纠正：`subject` 只是"没有标题时用正文首行"的
             #      派生显示值 —— 一条标题为 f872… 的笔记 `subject` 是空的。）
             #   · 若把标题混进 `content_hash`，现有 165 条映射的 base_hash
-            #     会**全部失效** → 触发一轮全量互相覆盖，改动量和风险都太大。
+            #     **全部失效** → 触发一轮全量互相覆盖。
             #   · 所以标题单独记基线（link.g_title / link.m_title），
-            #     只在"标题真的变了"时才写一个 PATCH，正文一个字都不动。
+            #     只在"标题真的变了"时才写一次，正文一个字都不动。
             #
-            # 方向只做 **小米 → 便笺**：
-            #   便笺的 Subject 默认由正文首行派生，用户改它本质就是改正文首行，
-            #   已经由正文同步覆盖；而小米的自定义标题在正文里根本不存在，
-            #   不推过去就永远丢失。
+            # ★ 两侧都能写（都实测过）：
+            #   便笺 → PATCH {"Subject": …}（正文不变）
+            #   小米 → POST entry，只换 extraInfo.title（content/modifyDate 不变）
+            #   所以做成**双向**：哪一侧改了标题就写到另一侧；
+            #   一侧**清空**标题（有→无）也会传播过去。
+            #
+            # ★ "显式标题"的判定（关键）：
+            #   便笺的 Subject 有 110 条是**自动派生**的（== 正文首行），
+            #   不能当成用户设的标题，否则一上来就互相覆盖。
+            #   所以：Subject == 正文首行 → 视为"没有标题"（g_exp = ""）。
             #
             # 首次（两侧基线都是 NULL）**只记不写** —— 否则升级瞬间会把现有
             # 110 条"派生的"便笺 Subject 全部改掉，那是灾难。
             if g_notes and m_notes and hasattr(self.graph, "update_subject"):
+                # ★ 语义版本闸门（2026-11-13）。
+                #   第一版基线记的是**原始值**（便笺侧可能记的是"派生出来的首行"）；
+                #   现在改成记**显式标题**（派生值一律当没有标题）。
+                #   不整体重建的话，升级后的第一轮会把 110 条派生的 Subject
+                #   当成"用户在便笺改了标题" → 反过来把小米的标题清空。
+                #   所以：第一次跑只重建基线、一个字都不写。
+                _tv2 = self.store.get_meta("title_base_v", "") == "2"
                 for _lk in self.store.all_links():
                     _mi = str(_lk.get("mi_id") or "")
                     _gid = str(_lk.get("graph_id") or "")
@@ -1641,44 +1657,78 @@ class SyncEngine:
                     _g = g_notes.get(_gid)
                     if not _m or not _g:
                         continue
-                    _m_t = (_m.get("title") or "").strip()
-                    _g_t = (_g.get("title") or "").strip()
-                    if _lk.get("m_title") is None and _lk.get("g_title") is None:
-                        # 首次建立基线：只记，不写
+
+                    # 小米：extraInfo.title（显式；空 = 没设标题）
+                    _m_x = (_m.get("title") or "").strip()
+                    # 便笺：Subject；若正好等于正文首行 → 派生值，当作"没设标题"
+                    _g_sub = (_g.get("title") or "").strip()
+                    _g_fl = first_line(_g.get("text") or "").strip()
+                    _g_x = "" if (not _g_sub or _g_sub == _g_fl) else _g_sub
+
+                    if (not _tv2) or (_lk.get("m_title") is None
+                                      and _lk.get("g_title") is None):
+                        # 还没建基线 / 语义升级：只记，不写
                         if not dry:
-                            self.store.set_link_titles(_mi, _g_t, _m_t)
+                            self.store.set_link_titles(_mi, _g_x, _m_x)
                         continue
-                    _prev_m = (_lk.get("m_title") or "").strip()
-                    if _g_t == _m_t:
-                        # ★ 两侧标题已经一致 —— 只需把基线对齐，**不写任何东西**。
-                        #   漏了这一步会留下"基线永远落后"的状态：每轮都会重新
-                        #   比较一遍（虽然不写，但白跑；而且下次真变化时判断也会歪）。
-                        if _prev_m != _m_t and not dry:
-                            self.store.set_link_titles(_mi, _g_t, _m_t)
+
+                    _pm = (_lk.get("m_title") or "").strip()
+                    _pg = (_lk.get("g_title") or "").strip()
+                    _m_changed = _m_x != _pm
+                    _g_changed = _g_x != _pg
+
+                    if not _m_changed and not _g_changed:
                         continue
-                    if not _m_t or _m_t == _prev_m:
+                    if _m_changed and _g_changed:
+                        # 两侧都改了标题 → 标题没有独立时间戳可比，
+                        # 按项目策略（graph_authoritative：便笺为权威）让便笺赢。
+                        _m_changed = False
+
+                    # ---- 小米改了（含"清空"）→ 写便笺 Subject ----
+                    if _m_changed:
+                        plan(ACTION_TITLE_TO_GRAPH,
+                             f"小米标题 -> 便笺 {_gid[:8]}："
+                             f"{_m_x[:24] or '（清空）'}")
+                        if dry:
+                            continue
+                        try:
+                            _res = self.graph.update_subject(
+                                _gid, _m_x, _lk.get("graph_changekey") or "")
+                            self.store.set_link_titles(_mi, _m_x, _m_x)
+                            # ★ ChangeKey 必须跟着更新：便笺每次 PATCH 都会换一个。
+                            #   不更新的话下一轮又拿旧 key 撞 412（实测踩到）。
+                            if _res.get("change_key"):
+                                self.store.set_link_graph_changekey(
+                                    _mi, _res["change_key"])
+                            publish("graph", self._g_item(
+                                _gid, _g.get("text") or "",
+                                _res.get("change_key", ""),
+                                _g.get("modified_iso") or "", title=_m_x))
+                        except Exception as _e:
+                            errors.append(
+                                f"同步标题到便笺失败（{_mi[:8]}）："
+                                f"{type(_e).__name__}: {_e}")
                         continue
-                    plan(ACTION_TITLE_TO_GRAPH,
-                         f"小米标题 -> 便笺 {_gid[:8]}：{_m_t[:24]}")
+
+                    # ---- 便笺改了（含"清空"）→ 写小米 extraInfo.title ----
+                    plan(ACTION_TITLE_TO_XIAOMI,
+                         f"便笺标题 -> 小米 {_mi[:8]}：{_g_x[:24] or '（清空）'}")
                     if dry:
                         continue
                     try:
-                        _res = self.graph.update_subject(
-                            _gid, _m_t, _lk.get("graph_changekey") or "")
-                        self.store.set_link_titles(_mi, _m_t, _m_t)
-                        # ★ ChangeKey 必须跟着更新：便笺每次 PATCH 都会换一个。
-                        #   不更新的话，下一次标题同步又会拿旧 key 撞 412
-                        #   （实测踩到：标题一直写不进去）。
-                        if _res.get("change_key"):
-                            self.store.set_link_graph_changekey(
-                                _mi, _res["change_key"])
-                        publish("graph", self._g_item(
-                            _gid, _g.get("text") or "",
-                            _res.get("change_key", ""),
-                            _g.get("modified_iso") or "", title=_m_t))
+                        self.xiaomi.update_title(_mi, _g_x)
+                        self.store.set_link_titles(_mi, _g_x, _g_x)
+                        publish("xiaomi", self._m_item(
+                            _mi, _m.get("text") or "",
+                            _m.get("modify_date"), title=_g_x))
                     except Exception as _e:
                         errors.append(
-                            f"同步标题失败（{_mi[:8]}）：{type(_e).__name__}: {_e}")
+                            f"同步标题到小米失败（{_mi[:8]}）："
+                            f"{type(_e).__name__}: {_e}")
+
+                if not _tv2 and not dry:
+                    # 基线整体重建完成 → 打上语义版本，之后才开始真正比对
+                    self.store.set_meta("title_base_v", "2")
 
             if not dry:
                 self.store.set_meta("paired", "1")
