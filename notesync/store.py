@@ -443,6 +443,19 @@ class Store:
                 (g_title or "", m_title or "", mi_id))
             self.db.commit()
 
+    def set_link_graph_changekey(self, mi_id: str, change_key: str) -> None:
+        """只更新便笺侧的 ChangeKey（标题写成功之后用）。
+
+        为什么不复用 `upsert_link`：那会连带重写 base_hash / g_hash / m_hash，
+        而标题同步**没有动正文**，把这些基线一起"刷新"会把未同步的正文改动
+        当成"已同步"吞掉。
+        """
+        with self._lock:
+            self.db.execute(
+                "UPDATE link SET graph_changekey=? WHERE mi_id=?",
+                (change_key or "", mi_id))
+            self.db.commit()
+
     def all_links(self) -> list[dict[str, Any]]:
         with self._lock:      # ★ 读也要加锁，见 get_cred 处的说明
             rows = self.db.execute("SELECT * FROM link").fetchall()

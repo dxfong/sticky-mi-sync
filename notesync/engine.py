@@ -1666,6 +1666,12 @@ class SyncEngine:
                         _res = self.graph.update_subject(
                             _gid, _m_t, _lk.get("graph_changekey") or "")
                         self.store.set_link_titles(_mi, _m_t, _m_t)
+                        # ★ ChangeKey 必须跟着更新：便笺每次 PATCH 都会换一个。
+                        #   不更新的话，下一次标题同步又会拿旧 key 撞 412
+                        #   （实测踩到：标题一直写不进去）。
+                        if _res.get("change_key"):
+                            self.store.set_link_graph_changekey(
+                                _mi, _res["change_key"])
                         publish("graph", self._g_item(
                             _gid, _g.get("text") or "",
                             _res.get("change_key", ""),

@@ -712,11 +712,28 @@ class RealGraph:
         为什么单独一个方法：小米的自定义标题是独立字段，便笺的 Subject 也能
         独立写（实测通过）。所以标题同步**不该走 `update_note`** ——
         那会把正文一起写一遍，白白刷新云端修改时间、还可能触发冲突。
+
+        ★ 412 时**自动取新 ChangeKey 重试一次**。
+          实测踩到：link 里存的 `graph_changekey` 常常是旧的（正文很久没同步过，
+          或者上一次是我手工 PATCH 的），直接 PATCH 就 412，
+          于是标题永远写不进去，日志里只留一句"放弃写标题"。
+          我们只改 Subject，重取一次 key 再写是安全的乐观重试。
         """
-        headers = {"If-Match": change_key} if change_key else None
-        code, data = _request(
-            "PATCH", f"{OUTLOOK}/me/notes/{note_id}", self.ensure_token(),
-            {"Subject": (subject or "")[:255]}, headers)
+        def _patch(ck: str):
+            headers = {"If-Match": ck} if ck else None
+            return _request(
+                "PATCH", f"{OUTLOOK}/me/notes/{note_id}", self.ensure_token(),
+                {"Subject": (subject or "")[:255]}, headers)
+
+        code, data = _patch(change_key)
+        if code == 412:
+            # 取一次最新的 ChangeKey 再试
+            code2, d2 = _request(
+                "GET", f"{OUTLOOK}/me/notes/{note_id}?$select=ChangeKey",
+                self.ensure_token())
+            ck2 = (d2.get("ChangeKey") or "") if code2 == 200 else ""
+            if ck2 and ck2 != change_key:
+                code, data = _patch(ck2)
         if code == 412:
             raise Conflict("这条便笺在别处被改过了（412），本轮放弃写标题")
         if code not in (200, 201):
