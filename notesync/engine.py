@@ -1649,7 +1649,14 @@ class SyncEngine:
                             self.store.set_link_titles(_mi, _g_t, _m_t)
                         continue
                     _prev_m = (_lk.get("m_title") or "").strip()
-                    if not _m_t or _m_t == _prev_m or _g_t == _m_t:
+                    if _g_t == _m_t:
+                        # ★ 两侧标题已经一致 —— 只需把基线对齐，**不写任何东西**。
+                        #   漏了这一步会留下"基线永远落后"的状态：每轮都会重新
+                        #   比较一遍（虽然不写，但白跑；而且下次真变化时判断也会歪）。
+                        if _prev_m != _m_t and not dry:
+                            self.store.set_link_titles(_mi, _g_t, _m_t)
+                        continue
+                    if not _m_t or _m_t == _prev_m:
                         continue
                     plan(ACTION_TITLE_TO_GRAPH,
                          f"小米标题 -> 便笺 {_gid[:8]}：{_m_t[:24]}")
