@@ -2187,17 +2187,44 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && $("detail").classList.contains("open")) closeDetail();
 });
+// 复制文本 —— 必须**两条路**都走。
+//
+// ★ `navigator.clipboard` **只在安全上下文里存在**（https / localhost / file://）。
+//   本服务是局域网明文 http（http://192.168.31.66:8787），
+//   所以 `navigator.clipboard` 是 `undefined` → 直接调用必抛 → 按钮显示"复制失败"。
+//   （2026-11-12 用户实测：点复制一直失败。）
+//   退回 `document.execCommand("copy")`：它不要求安全上下文，http 下可用。
+async function copyText(t) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(t); return true; } catch (e) {}
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-2000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, t.length);     // iOS Safari 需要
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+
 $("detailCopy").onclick = async () => {
   const k = $("detail").dataset.key;
   if (!k) return;
   const btn = $("detailCopy");
   try {
-    const r = await api("/api/note?key=" + encodeURIComponent(k));
+    const r = await api("/api/note?key=" + encodeURIComponent(k), undefined, 15000);
     const t = (r && r.ok)
       ? ((r.graph && r.graph.text) || (r.xiaomi && r.xiaomi.text) || "")
       : "";
-    await navigator.clipboard.writeText(t);
-    btn.textContent = "已复制";
+    btn.textContent = (await copyText(t)) ? "已复制" : "复制失败";
   } catch (e) {
     btn.textContent = "复制失败";
   }

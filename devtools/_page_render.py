@@ -333,6 +333,20 @@ def run_scenario(browser, html: str, sc: dict, tag: str,
     pg.wait_for_timeout(900)
     btn_fail = txt("#btnAuto")
 
+    # ★ 复制按钮（2026-11-12 用户实测一直"复制失败"）
+    #   根因：`navigator.clipboard` **只在安全上下文存在**（https/localhost/file），
+    #   而本服务是局域网明文 http → 它是 undefined → 直接调必抛。
+    #   现在有 execCommand 兜底。这里把 clipboard 抹掉，模拟真实的 http 环境。
+    copy_res = pg.evaluate("""async () => {
+      try {
+        Object.defineProperty(navigator, 'clipboard',
+          {value: undefined, configurable: true});
+      } catch (e) {}
+      let threw = null, ret = null;
+      try { ret = await copyText('回归测试'); } catch (e) { threw = String(e); }
+      return {threw, ret};
+    }""")
+
     shot = SHOTS / (f"page_render_{safe(tag)}_"
                     + safe(nm) + ".png")
     pg.screenshot(path=str(shot))
@@ -376,6 +390,13 @@ def run_scenario(browser, html: str, sc: dict, tag: str,
        f"可点={btn_enabled}｜点前「{btn_before}」→ 点后「{btn_ok}」")
     ok(pre + "★ 请求失败时按钮也要恢复（不许卡在「正在…」）",
        "正在" not in btn_fail, f"「{btn_fail}」")
+
+    # ★ 复制按钮（2026-11-12 用户实测一直"复制失败"）
+    #   根因：`navigator.clipboard` **只在安全上下文存在**（https/localhost/file），
+    #   而本服务是局域网明文 http → 它是 undefined → 直接调必抛。
+    ok(pre + "★ 非安全上下文（http）下复制不抛异常、走兜底",
+       copy_res.get("threw") is None and isinstance(copy_res.get("ret"), bool),
+       str(copy_res))
 
     # ---- 后台循环心跳（2026-10-21）----
     # 停摆时必须报警；健康时**绝不能误报**（否则用户会习惯性忽略这行字）。
